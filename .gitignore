@@ -1,0 +1,122 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Directory for instrumented code coverage downloads
+lib-cov
+coverage
+*.lcov
+.nyc_output
+
+# Grunt folders
+.grunt
+
+# Bower dependency folders
+bower_components
+
+# node-waf and ry/node_gyp builder
+build/Release
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory (_snowpack)
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Microbundle cache
+.rts2_cache_main
+.rts2_cache_lit
+.rts2_cache_umd
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+.env.*.local
+!.env.example
+
+# parcel-cache
+.parcel-cache
+
+# Next.js build images
+.next
+out
+
+# Nuxt.js build and generate directory
+.nuxt
+dist
+
+# Gatsby files
+.cache/
+# Comment in the public line if your project uses Gatsby and you want to ignore the public folder
+# public
+
+# vuepress build output
+.vuepress/dist
+
+# Serverless Webpack directories
+.webpack/
+
+# webpack-dev-server templates
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# Tern project file
+.tern-project
+
+# Editor-specific files / IDEs
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+
+# Operating System files
+.DS_Store
+Thumbs.db

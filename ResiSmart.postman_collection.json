@@ -1,0 +1,459 @@
+{
+	"info": {
+		"_postman_id": "7a35cb99-d419-482a-a9bd-8316dfa996cc",
+		"name": "ResiSmart API Collection",
+		"description": "Comprehensive Postman collection for the ResiSmart Society and Shop Management multi-tenant platform. Designed to run on port 6000.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "1. Register User",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Alice Admin\",\n    \"email\": \"alice@resismart.com\",\n    \"password\": \"password123\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/register",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"register"
+							]
+						},
+						"description": "Registers a new user identity in the central system."
+					},
+					"response": []
+				},
+				{
+					"name": "2. Login User",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const responseJson = pm.response.json();",
+									"if (responseJson.token) {",
+									"    pm.collectionVariables.set(\"accessToken\", responseJson.token);",
+									"    pm.logger.info(\"Auto-Selected Context: Scoped JWT Token Saved.\");",
+									"}",
+									"if (responseJson.userId) {",
+									"    pm.collectionVariables.set(\"userId\", responseJson.userId);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"email\": \"admin@resismart.com\",\n    \"password\": \"Admin@123\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/login",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"login"
+							]
+						},
+						"description": "Logs in the user identity. Returns scoped JWT token if the user has exactly 1 profile, or lists all profiles if the user has multiple scopes."
+					},
+					"response": []
+				},
+				{
+					"name": "3. Select Context (Multiple Profiles)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const responseJson = pm.response.json();",
+									"if (responseJson.token) {",
+									"    pm.collectionVariables.set(\"accessToken\", responseJson.token);",
+									"    pm.logger.info(\"Context Selected: Scoped JWT Token Saved.\");",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"userId\": \"{{userId}}\",\n    \"tenantId\": \"{{societyId}}\",\n    \"role\": \"SOCIETY_ADMIN\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/auth/select-context",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"auth",
+								"select-context"
+							]
+						},
+						"description": "Switches / selects active workspace scope and returns the final authorization token."
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints handling registration, login, and workspace context toggling."
+		},
+		{
+			"name": "Societies & Flats",
+			"item": [
+				{
+					"name": "Create Society (Platform Owner Only)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const responseJson = pm.response.json();",
+									"if (responseJson.society && responseJson.society._id) {",
+									"    pm.collectionVariables.set(\"societyId\", responseJson.society._id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"name\": \"Palm Heights Apartments\",\n    \"address\": \"Sector 54, Central District\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/societies",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"societies"
+							]
+						},
+						"description": "Creates a new society tenant. Restricted to platform owners/employees."
+					},
+					"response": []
+				},
+				{
+					"name": "Create Flat (Society Admin/Committee)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const responseJson = pm.response.json();",
+									"if (responseJson.flat && responseJson.flat._id) {",
+									"    pm.collectionVariables.set(\"flatId\", responseJson.flat._id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"number\": \"202\",\n    \"blockName\": \"Tower B\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/societies/flats",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"societies",
+								"flats"
+							]
+						},
+						"description": "Creates a flat in the active society context."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Flats (Society Residents/Admins)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/societies/flats",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"societies",
+								"flats"
+							]
+						},
+						"description": "Lists all flats under the active society workspace."
+					},
+					"response": []
+				},
+				{
+					"name": "Update Flat Owner/Status (Admin)",
+					"request": {
+						"method": "PUT",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"status\": \"OWNER_OCCUPIED\",\n    \"owners\": [\"{{userId}}\"]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/societies/flats/{{flatId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"societies",
+								"flats",
+								"{{flatId}}"
+							]
+						},
+						"description": "Updates flat occupancy status or registers flat owners. Automatically tracks diffs in audit logging."
+					},
+					"response": []
+				}
+			],
+			"description": "Endpoints to manage physical structures, flats, and society details."
+		},
+		{
+			"name": "Rentals",
+			"item": [
+				{
+					"name": "Create Lease / Rental Agreement",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"const responseJson = pm.response.json();",
+									"if (responseJson.agreement && responseJson.agreement._id) {",
+									"    pm.collectionVariables.set(\"leaseId\", responseJson.agreement._id);",
+									"}"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"flatId\": \"{{flatId}}\",\n    \"tenantId\": \"{{userId}}\",\n    \"rentAmount\": 18000,\n    \"securityDeposit\": 36000,\n    \"startDate\": \"2026-06-09T00:00:00.000Z\",\n    \"endDate\": \"2027-06-09T00:00:00.000Z\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/rentals",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"rentals"
+							]
+						},
+						"description": "Rents a flat to a tenant. Auto-cascades flat occupancy status to RENTED, registers active lease, and adds tenant role memberships."
+					},
+					"response": []
+				},
+				{
+					"name": "Get Rental Agreements",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/rentals",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"rentals"
+							]
+						},
+						"description": "Queries all active and historical rental lease agreements scoped to the society."
+					},
+					"response": []
+				},
+				{
+					"name": "Update Lease Settings",
+					"request": {
+						"method": "PUT",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"rentAmount\": 19500,\n    \"isActive\": true\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{baseUrl}}/rentals/{{leaseId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"rentals",
+								"{{leaseId}}"
+							]
+						},
+						"description": "Modifies rent amounts or cancels a lease agreement. Inactivating resets flat status to VACANT."
+					},
+					"response": []
+				}
+			],
+			"description": "Handles flat rentals, leases, and tenant assignments."
+		},
+		{
+			"name": "Audits",
+			"item": [
+				{
+					"name": "Get Audit Logs (Paginated)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/audits?page=1&limit=20",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"audits"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						},
+						"description": "Fetches active tenant history. Automatically scopes audit results to active context boundaries."
+					},
+					"response": []
+				}
+			],
+			"description": "Enables administrators to view activity logs, changes diff data, user agents, and timestamps."
+		}
+	],
+	"auth": {
+		"type": "bearer",
+		"bearer": [
+			{
+				"key": "token",
+				"value": "{{accessToken}}",
+				"type": "string"
+			}
+		]
+	},
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:6000/api/v1",
+			"type": "string"
+		},
+		{
+			"key": "accessToken",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "userId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "societyId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "flatId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "leaseId",
+			"value": "",
+			"type": "string"
+		}
+	]
+}
