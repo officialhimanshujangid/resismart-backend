@@ -2,7 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import { User } from '../models/user.model';
 import { hashPassword, comparePassword } from '../utils/hash.util';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.util';
-import { registerSchema, loginSchema, selectContextSchema } from '../validators/auth.validator';
+import { registerSchema, loginSchema, selectContextSchema, forgotPasswordSchema, resetPasswordSchema } from '../validators/auth.validator';
+import crypto from 'crypto';
 import { AuditService } from '../services/audit.service';
 import { TenantType } from '../constants/roles';
 import EmailService from '../services/email.service';
@@ -325,5 +326,75 @@ export const refreshSessionToken = async (
     });
   } catch (error) {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+};
+
+export const forgotPassword = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const validatedData = forgotPasswordSchema.parse(req.body);
+    const user = await User.findOne({ email: validatedData.email });
+    
+    // For security reasons, do not leak whether an email exists or not.
+    if (!user) {
+      res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+      return;
+    }
+
+    // Generate token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour from now
+    
+    await user.save();
+
+    // Send email
+    EmailService.sendPasswordResetEmail(user.email, resetToken);
+
+    res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      res.status(400).json({ errors: error.errors });
+      return;
+    }
+    next(error);
+  }
+};
+
+export const resetPassword = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const validatedData = resetPasswordSchema.parse(req.body);
+
+    const user = await User.findOne({
+      resetPasswordToken: validatedData.token,
+      resetPasswordExpires: { $gt: new Date() }, // ensure token is not expired
+    });
+
+    if (!user) {
+      res.status(400).json({ error: 'Password reset token is invalid or has expired.' });
+      return;
+    }
+
+    // Hash new password
+    user.passwordHash = await hashPassword(validatedData.password);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+
+    await user.save();
+
+    res.status(200).json({ message: 'Password has been reset successfully.' });
+  } catch (error: any) {
+    if (error.name === 'ZodError') {
+      res.status(400).json({ errors: error.errors });
+      return;
+    }
+    next(error);
   }
 };

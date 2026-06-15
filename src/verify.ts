@@ -21,13 +21,39 @@ const runVerification = async () => {
   console.log('MongoDB connected successfully.');
 
   // Clean database collections
-  console.log('Cleaning test collections...');
-  await User.deleteMany({});
+  console.log('Cleaning test collections (preserving admin account)...');
+  await User.deleteMany({ email: { $ne: 'admin@resismart.com' } });
   await Society.deleteMany({});
   await Flat.deleteMany({});
   await RentalAgreement.deleteMany({});
   await AuditLog.deleteMany({});
   console.log('Database cleaned.\n');
+
+  // Seed the owner account if it doesn't exist
+  const ownerEmail = 'admin@resismart.com';
+  const existingOwner = await User.findOne({ email: ownerEmail });
+  if (!existingOwner) {
+    console.log('Owner account not found. Seeding initial owner account...');
+    const password = 'Admin@123';
+    const hashedPassword = await hashPassword(password);
+    const systemTenantId = new mongoose.Types.ObjectId('000000000000000000000000');
+    await User.create({
+      name: 'System Owner',
+      email: ownerEmail,
+      passwordHash: hashedPassword,
+      isActive: true,
+      memberships: [
+        {
+          tenantType: TenantType.SYSTEM,
+          tenantId: systemTenantId,
+          role: UserRole.SYSTEM_OWNER,
+        },
+      ],
+    });
+    console.log('Owner account seeded successfully.');
+  } else {
+    console.log('Owner account already exists, preserving it.');
+  }
 
   let testPassed = true;
 
@@ -291,6 +317,36 @@ const runVerification = async () => {
     console.error('Test execution encountered error:', error);
     testPassed = false;
   } finally {
+    try {
+      const email = 'admin@resismart.com';
+      const existingOwner = await User.findOne({ email });
+      if (!existingOwner) {
+        console.log('Owner account not found in finally block. Seeding initial owner account...');
+        const password = 'Admin@123';
+        const hashedPassword = await hashPassword(password);
+        const systemTenantId = new mongoose.Types.ObjectId('000000000000000000000000');
+        
+        await User.create({
+          name: 'System Owner',
+          email,
+          passwordHash: hashedPassword,
+          isActive: true,
+          memberships: [
+            {
+              tenantType: TenantType.SYSTEM,
+              tenantId: systemTenantId,
+              role: UserRole.SYSTEM_OWNER,
+            },
+          ],
+        });
+        console.log('Seeded initial owner account successfully.');
+      } else {
+        console.log('Owner account already exists, skipping seed in finally block.');
+      }
+    } catch (seedError: any) {
+      console.error('Failed to seed owner account in finally block:', seedError.message);
+    }
+
     await mongoose.disconnect();
     console.log('\nDisconnected from MongoDB.');
     

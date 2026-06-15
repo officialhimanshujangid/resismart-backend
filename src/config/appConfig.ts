@@ -21,4 +21,8 @@ export const appConfig = {
   smtpFromName: process.env.SMTP_FROM_NAME || 'SaaS Platform',
   smtpFromEmail: process.env.SMTP_FROM_EMAIL || 'support@resismart.com',
   smtpReplyTo: process.env.SMTP_REPLY_TO || 'support@resismart.com',
+  awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+  awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+  awsRegion: process.env.AWS_REGION || 'eu-north-1',
+  awsS3Bucket: process.env.AWS_S3_BUCKET || 'amzn-himanshu-resismart',
 };

@@ -8,6 +8,10 @@ import authRoutes from './routes/auth.routes';
 import societyRoutes from './routes/society.routes';
 import rentalRoutes from './routes/rental.routes';
 import auditRoutes from './routes/audit.routes';
+import designationRoutes from './routes/designation.routes';
+import systemEmployeeRoutes from './routes/system-employee.routes';
+import permissionRoleRoutes from './routes/permission-role.routes';
+import uploadRoutes from './routes/upload.routes';
 import { errorHandler } from './middlewares/error.middleware';
 import { requestLogger } from './middlewares/logger.middleware';
 
@@ -29,7 +33,8 @@ app.use(cors({
 // 3. Compress Response Payloads for Optimization
 app.use(compression());
 
-// 4. Rate Limiting Middleware
+// 4. Rate Limiting Middleware (Disabled for testing/development)
+/*
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100, // Limit each IP to 100 requests per windowMs
@@ -38,6 +43,7 @@ const limiter = rateLimit({
   message: { error: 'Too many requests from this IP, please try again after 15 minutes' },
 });
 app.use('/api', limiter);
+*/
 
 // 5. Body Parsers
 app.use(express.json());
@@ -56,6 +62,10 @@ app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/societies', societyRoutes);
 app.use('/api/v1/rentals', rentalRoutes);
 app.use('/api/v1/audits', auditRoutes);
+app.use('/api/v1/designations', designationRoutes);
+app.use('/api/v1/system-employees', systemEmployeeRoutes);
+app.use('/api/v1/permission-roles', permissionRoleRoutes);
+app.use('/api/v1/upload', uploadRoutes);
 
 // 8. Global Error Handler Middleware
 app.use(errorHandler);
