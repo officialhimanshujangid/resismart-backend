@@ -344,14 +344,16 @@ export const forgotPassword = async (
       return;
     }
 
-    // Generate token
+    // Generate a token; email the plaintext but persist only its hash so a DB
+    // leak cannot be used to reset accounts.
     const resetToken = crypto.randomBytes(32).toString('hex');
-    user.resetPasswordToken = resetToken;
+    const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+    user.resetPasswordToken = hashedToken;
     user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour from now
-    
+
     await user.save();
 
-    // Send email
+    // Send email with the plaintext token
     EmailService.sendPasswordResetEmail(user.email, resetToken);
 
     res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
@@ -372,8 +374,9 @@ export const resetPassword = async (
   try {
     const validatedData = resetPasswordSchema.parse(req.body);
 
+    const hashedToken = crypto.createHash('sha256').update(validatedData.token).digest('hex');
     const user = await User.findOne({
-      resetPasswordToken: validatedData.token,
+      resetPasswordToken: hashedToken,
       resetPasswordExpires: { $gt: new Date() }, // ensure token is not expired
     });
 

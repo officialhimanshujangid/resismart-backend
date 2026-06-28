@@ -1,11 +1,22 @@
 import app from './app';
-import { appConfig } from './config/appConfig';
+import { appConfig, assertConfig, isRazorpayConfigured } from './config/appConfig';
 import { connectDatabase } from './config/db';
 import { logger } from './utils/logger.util';
+import { startCronJobs } from './services/cron.service';
 
 const startServer = async () => {
+  // Fail fast if critical secrets are missing (production)
+  assertConfig();
+
+  if (!isRazorpayConfigured()) {
+    logger.warn('Razorpay keys are not configured — online checkout will be unavailable until RAZORPAY_KEY_ID/SECRET are set.');
+  }
+
   // Connect to MongoDB
   await connectDatabase();
+
+  // Register scheduled jobs (expiry reminders + auto-expire)
+  startCronJobs();
 
   const PORT = appConfig.port;
 

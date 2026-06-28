@@ -12,10 +12,17 @@ import designationRoutes from './routes/designation.routes';
 import systemEmployeeRoutes from './routes/system-employee.routes';
 import permissionRoleRoutes from './routes/permission-role.routes';
 import uploadRoutes from './routes/upload.routes';
+import planRoutes from './routes/plan.routes';
+import billingRoutes from './routes/billing.routes';
+import settingsRoutes from './routes/settings.routes';
+import webhookRoutes from './routes/webhook.routes';
 import { errorHandler } from './middlewares/error.middleware';
 import { requestLogger } from './middlewares/logger.middleware';
 
 const app = express();
+
+// Behind a proxy/load balancer in production so express-rate-limit & req.ip work correctly
+app.set('trust proxy', 1);
 
 // 0. Request Logger Middleware
 app.use(requestLogger);
@@ -24,8 +31,11 @@ app.use(requestLogger);
 app.use(helmet());
 
 // 2. Cross-Origin Resource Sharing Setup
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:4444,http://127.0.0.1:4444,http://localhost:3000,http://127.0.0.1:3000')
+  .split(',')
+  .map((o) => o.trim());
 app.use(cors({
-  origin: ['http://localhost:4444', 'http://127.0.0.1:4444', 'http://localhost:3000', 'http://127.0.0.1:3000'],
+  origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
@@ -33,31 +43,40 @@ app.use(cors({
 // 3. Compress Response Payloads for Optimization
 app.use(compression());
 
-// 4. Rate Limiting Middleware (Disabled for testing/development)
-/*
-const limiter = rateLimit({
+// 4. Rate Limiting — general API limiter + stricter auth limiter
+const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests from this IP, please try again after 15 minutes' },
+  message: { error: 'Too many requests from this IP, please try again later.' },
 });
-app.use('/api', limiter);
-*/
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20, // login/register/reset are sensitive
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many authentication attempts. Please try again after 15 minutes.' },
+});
 
-// 5. Body Parsers
-app.use(express.json());
+// 5. Razorpay webhook — MUST receive the raw body for signature verification,
+//    so it is mounted before the JSON body parser.
+app.use('/api/v1/webhooks', express.raw({ type: '*/*' }), webhookRoutes);
+
+// 6. Body Parsers
+app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// 6. Base routes
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    platform: process.env.APP_NAME || 'ResiSmart',
-  });
+// 7. Apply rate limiters
+app.use('/api/v1/auth', authLimiter);
+app.use('/api', generalLimiter);
+
+// 8. Base route
+app.get('/', (_req, res) => {
+  res.json({ status: 'online', platform: process.env.APP_NAME || 'ResiSmart' });
 });
 
-// 7. Mount Modules
+// 9. Mount Modules
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/societies', societyRoutes);
 app.use('/api/v1/rentals', rentalRoutes);
@@ -66,8 +85,16 @@ app.use('/api/v1/designations', designationRoutes);
 app.use('/api/v1/system-employees', systemEmployeeRoutes);
 app.use('/api/v1/permission-roles', permissionRoleRoutes);
 app.use('/api/v1/upload', uploadRoutes);
+app.use('/api/v1/plans', planRoutes);
+app.use('/api/v1/billing', billingRoutes);
+app.use('/api/v1/settings', settingsRoutes);
 
-// 8. Global Error Handler Middleware
+// 10. JSON 404 for unknown routes
+app.use((req, res) => {
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+// 11. Global Error Handler Middleware
 app.use(errorHandler);
 
 export default app;

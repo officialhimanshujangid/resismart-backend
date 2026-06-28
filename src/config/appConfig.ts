@@ -4,14 +4,35 @@ import path from 'path';
 // Load environmental variables from .env file
 dotenv.config({ path: path.join(__dirname, '../../.env') });
 
+const isProduction = (process.env.NODE_ENV || 'development') === 'production';
+
+/**
+ * Resolve a secret from the environment.
+ * In production we refuse to fall back to a weak default — the process should
+ * crash loudly rather than silently sign tokens with a guessable key.
+ */
+const requireSecret = (key: string, devFallback: string): string => {
+  const value = process.env[key];
+  if (value && value.trim().length > 0) return value;
+  if (isProduction) {
+    // Defer throwing until assertConfig() so a single message lists everything missing.
+    return '';
+  }
+  // eslint-disable-next-line no-console
+  console.warn(`[config] ${key} is not set — using an insecure development fallback. DO NOT use this in production.`);
+  return devFallback;
+};
+
 export const appConfig = {
   port: parseInt(process.env.PORT || '5000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
+  isProduction,
   appName: process.env.APP_NAME || 'ResiSmart',
   supportEmail: process.env.SUPPORT_EMAIL || 'support@resismart.com',
+  frontendUrl: process.env.FRONTEND_URL || 'http://localhost:4444',
   mongoUri: process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/resismart',
-  jwtAccessSecret: process.env.JWT_ACCESS_SECRET || 'fallback_jwt_access_secret_12345',
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'fallback_jwt_refresh_secret_12345',
+  jwtAccessSecret: requireSecret('JWT_ACCESS_SECRET', 'dev_only_access_secret_do_not_use_in_prod'),
+  jwtRefreshSecret: requireSecret('JWT_REFRESH_SECRET', 'dev_only_refresh_secret_do_not_use_in_prod'),
   jwtAccessExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',
   jwtRefreshExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
   smtpHost: process.env.SMTP_HOST || 'smtp-relay.brevo.com',
@@ -25,4 +46,28 @@ export const appConfig = {
   awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
   awsRegion: process.env.AWS_REGION || 'eu-north-1',
   awsS3Bucket: process.env.AWS_S3_BUCKET || 'amzn-himanshu-resismart',
+  // Razorpay (live integration)
+  razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
+  razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
+  razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
 };
+
+/**
+ * Validate critical configuration at boot. Called from server startup.
+ * Throws (process exits) when required secrets are missing in production.
+ */
+export const assertConfig = (): void => {
+  const missing: string[] = [];
+  if (isProduction) {
+    if (!process.env.JWT_ACCESS_SECRET) missing.push('JWT_ACCESS_SECRET');
+    if (!process.env.JWT_REFRESH_SECRET) missing.push('JWT_REFRESH_SECRET');
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Refusing to start: required environment variables are missing in production: ${missing.join(', ')}`
+    );
+  }
+};
+
+export const isRazorpayConfigured = (): boolean =>
+  Boolean(appConfig.razorpayKeyId && appConfig.razorpayKeySecret);
