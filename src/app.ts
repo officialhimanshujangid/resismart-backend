@@ -33,9 +33,10 @@ app.use(requestLogger);
 app.use(helmet());
 
 // 2. Cross-Origin Resource Sharing Setup
-const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:4444,http://127.0.0.1:4444,http://localhost:3000,http://127.0.0.1:3000')
-  .split(',')
-  .map((o) => o.trim());
+const allowedOrigins = process.env.CORS_ORIGINS 
+  ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim())
+  : '*'; // Fallback to allow all origins if not explicitly set
+
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
