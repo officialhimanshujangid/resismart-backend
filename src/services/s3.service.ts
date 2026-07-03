@@ -70,7 +70,7 @@ class S3Service {
     const command = new GetObjectCommand({
       Bucket: appConfig.awsS3Bucket,
       Key: key,
-      ...(opts?.downloadName ? { ResponseContentDisposition: `attachment; filename="${opts.downloadName}"` } : {}),
+      ...(opts?.downloadName ? { ResponseContentDisposition: `inline; filename="${opts.downloadName}"` } : {}),
     });
     return getSignedUrl(this.s3Client, command, { expiresIn: opts?.expiresIn ?? 300 });
   }

@@ -48,9 +48,10 @@ export class PlanController {
    * Public list of active customer-facing plans (excludes internal system plans).
    * Returns computed pricing via the model virtuals.
    */
-  static async getActivePlans(_req: Request, res: Response) {
+  static async getActivePlans(req: Request, res: Response) {
     try {
-      const plans = await Plan.find({ isActive: true, isDeleted: false, isSystem: false }).sort({ basePrice: 1 });
+      const module = req.query.module || 'society';
+      const plans = await Plan.find({ isActive: true, isDeleted: false, isSystem: false, module }).sort({ basePrice: 1 });
       return res.status(200).json({ success: true, plans });
     } catch (error: any) {
       return res.status(500).json({ success: false, message: error.message });
@@ -62,8 +63,11 @@ export class PlanController {
    */
   static async getPlans(req: Request, res: Response) {
     try {
-      const { page, pageSize, isPagination, search, status } = req.query;
+      const { page, pageSize, isPagination, search, status, module } = req.query;
       const filter: Record<string, any> = { isDeleted: false, isSystem: false };
+
+      if (module) filter.module = module;
+      else filter.module = 'society';
 
       if (status === 'active') filter.isActive = true;
       else if (status === 'inactive') filter.isActive = false;

@@ -11,18 +11,18 @@ import { TenantType, UserRole } from './constants/roles';
 
 // Set Env variables for testing
 process.env.NODE_ENV = 'development';
-process.env.APP_NAME = 'ResiSmart Test Suite';
+process.env.APP_NAME = 'Resismart Test Suite';
 
 const runVerification = async () => {
-  console.log('--- ResiSmart E2E Verification Script Starting ---');
+  console.log('--- Resismart E2E Verification Script Starting ---');
   console.log(`Connecting to Mongo: ${appConfig.mongoUri}`);
-  
+
   await mongoose.connect(appConfig.mongoUri);
   console.log('MongoDB connected successfully.');
 
   // Clean database collections
   console.log('Cleaning test collections (preserving admin account)...');
-  await User.deleteMany({ email: { $ne: 'admin@resismart.com' } });
+  await User.deleteMany({ email: { $ne: 'admin@Resismart.com' } });
   await Society.deleteMany({});
   await Flat.deleteMany({});
   await RentalAgreement.deleteMany({});
@@ -30,7 +30,7 @@ const runVerification = async () => {
   console.log('Database cleaned.\n');
 
   // Seed the owner account if it doesn't exist
-  const ownerEmail = 'admin@resismart.com';
+  const ownerEmail = 'admin@Resismart.com';
   const existingOwner = await User.findOne({ email: ownerEmail });
   if (!existingOwner) {
     console.log('Owner account not found. Seeding initial owner account...');
@@ -64,11 +64,11 @@ const runVerification = async () => {
     console.log('[Test 1] Registering test user Alice...');
     const alicePassword = 'password123';
     const aliceHash = await hashPassword(alicePassword);
-    
+
     // Direct model insert to represent registered state
     const alice = await User.create({
       name: 'Alice Admin',
-      email: 'alice@resismart.com',
+      email: 'alice@Resismart.com',
       passwordHash: aliceHash,
       isActive: true,
       memberships: [],
@@ -134,7 +134,7 @@ const runVerification = async () => {
     console.log('\n[Test 4] Registering and testing single-profile user Bob...');
     const bob = await User.create({
       name: 'Bob Tenant',
-      email: 'bob@resismart.com',
+      email: 'bob@Resismart.com',
       passwordHash: await hashPassword('password123'),
       isActive: true,
       memberships: [
@@ -211,7 +211,7 @@ const runVerification = async () => {
     // 7. Lease Creation & State Propagation
     // ----------------------------------------------------
     console.log('\n[Test 7] Creating Lease / Rental Agreement (renting Flat to Bob)...');
-    
+
     // Simulate rent registration
     const lease = await RentalAgreement.create({
       flatId: flat._id,
@@ -287,7 +287,7 @@ const runVerification = async () => {
     // 9. Fire simulated Audit Log & Check insertion
     // ----------------------------------------------------
     console.log('\n[Test 9] Logging actions in AuditLog collection...');
-    
+
     // Log Flat modification
     await AuditLog.create({
       userId: bob._id,
@@ -318,14 +318,14 @@ const runVerification = async () => {
     testPassed = false;
   } finally {
     try {
-      const email = 'admin@resismart.com';
+      const email = 'admin@Resismart.com';
       const existingOwner = await User.findOne({ email });
       if (!existingOwner) {
         console.log('Owner account not found in finally block. Seeding initial owner account...');
         const password = 'Admin@123';
         const hashedPassword = await hashPassword(password);
         const systemTenantId = new mongoose.Types.ObjectId('000000000000000000000000');
-        
+
         await User.create({
           name: 'System Owner',
           email,
@@ -349,7 +349,7 @@ const runVerification = async () => {
 
     await mongoose.disconnect();
     console.log('\nDisconnected from MongoDB.');
-    
+
     console.log('\n=========================================');
     if (testPassed) {
       console.log(' VERIFICATION RESULT: ALL TESTS PASSED ');

@@ -21,6 +21,7 @@ export interface IComputedPricing extends IBillingCycle {
 export interface IPlan extends Document {
   name: string;
   description: string;
+  module: 'society' | 'shop';
   isActive: boolean;
   isFeatured: boolean;
   isDeleted: boolean;
@@ -64,6 +65,7 @@ const BillingCycleSchema = new Schema<IBillingCycle>({
 const PlanSchema = new Schema({
   name: { type: String, required: true, unique: true, trim: true },
   description: { type: String, default: '' },
+  module: { type: String, enum: ['society', 'shop'], default: 'society' },
   isActive: { type: Boolean, default: true },
   isFeatured: { type: Boolean, default: false },
   isDeleted: { type: Boolean, default: false },

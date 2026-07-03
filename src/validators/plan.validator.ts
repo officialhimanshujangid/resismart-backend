@@ -19,6 +19,7 @@ const capabilitiesSchema = z.record(z.string(), z.number());
 export const createPlanSchema = z.object({
   name: z.string().min(2, 'Plan name must be at least 2 characters'),
   description: z.string().max(500).optional(),
+  module: z.enum(['society', 'shop']).optional(),
   basePrice: z.number().min(0, 'Base price cannot be negative'),
   currency: z.string().length(3).optional(),
   isActive: z.boolean().optional(),

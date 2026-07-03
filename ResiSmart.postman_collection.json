@@ -1,8 +1,8 @@
 {
 	"info": {
 		"_postman_id": "7a35cb99-d419-482a-a9bd-8316dfa996cc",
-		"name": "ResiSmart API Collection",
-		"description": "Comprehensive Postman collection for the ResiSmart Society and Shop Management multi-tenant platform. Designed to run on port 6000.",
+		"name": "Resismart API Collection",
+		"description": "Comprehensive Postman collection for the Resismart Society and Shop Management multi-tenant platform. Designed to run on port 6000.",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"item": [
@@ -16,7 +16,7 @@
 						"header": [],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n    \"name\": \"Alice Admin\",\n    \"email\": \"alice@resismart.com\",\n    \"password\": \"password123\"\n}",
+							"raw": "{\n    \"name\": \"Alice Admin\",\n    \"email\": \"alice@Resismart.com\",\n    \"password\": \"password123\"\n}",
 							"options": {
 								"raw": {
 									"language": "json"
@@ -62,7 +62,7 @@
 						"header": [],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n    \"email\": \"admin@resismart.com\",\n    \"password\": \"Admin@123\"\n}",
+							"raw": "{\n    \"email\": \"admin@Resismart.com\",\n    \"password\": \"Admin@123\"\n}",
 							"options": {
 								"raw": {
 									"language": "json"

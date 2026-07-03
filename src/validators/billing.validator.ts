@@ -16,17 +16,29 @@ export const verifyPaymentSchema = z.object({
 });
 
 export const assignCashPlanSchema = z.object({
-  societyId: objectId,
+  societyId: objectId.optional(),
+  shopId: objectId.optional(),
+  tenantId: objectId.optional(),
+  tenantType: z.string().optional(),
   planId: objectId,
   tenure: tenureEnum,
   paymentMethod: z.enum(['cash', 'online']).default('cash'),
   note: z.string().max(300).optional(),
   collectedById: objectId.optional(),
   collectedByName: z.string().max(120).optional(),
+}).refine(data => data.societyId || data.shopId || data.tenantId, {
+  message: 'Must provide either societyId, shopId, or tenantId',
+  path: ['tenantId']
 });
 
 export const upgradePreviewSchema = z.object({
-  societyId: objectId,
+  societyId: objectId.optional(),
+  shopId: objectId.optional(),
+  tenantId: objectId.optional(),
+  tenantType: z.string().optional(),
   planId: objectId,
   tenure: tenureEnum,
+}).refine(data => data.societyId || data.shopId || data.tenantId, {
+  message: 'Must provide either societyId, shopId, or tenantId',
+  path: ['tenantId']
 });

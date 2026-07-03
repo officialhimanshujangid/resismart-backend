@@ -4,6 +4,7 @@ import { Plan } from '../models/plan.model';
 import { Subscription } from '../models/subscription.model';
 import { Invoice, IInvoice } from '../models/invoice.model';
 import { Society } from '../models/society.model';
+import { Shop } from '../models/shop.model';
 import { User } from '../models/user.model';
 import { RazorpayService } from '../services/razorpay.service';
 import { ensureRazorpayPlans } from '../services/razorpay-plan.service';
@@ -11,7 +12,7 @@ import { InvoiceService } from '../services/invoice.service';
 import s3Service from '../services/s3.service';
 import EmailService from '../services/email.service';
 import { AuditService } from '../services/audit.service';
-import { resolveSocietyEmail } from '../utils/society-email.util';
+import { resolveTenantEmail } from '../utils/tenant-email.util';
 import { getGoverningSubscription, getEffectiveLimits, capsToObject } from '../services/subscription-lifecycle.service';
 import { runExpireOverdue, runExpiryReminders } from '../services/cron.service';
 import { TenantType } from '../constants/roles';
@@ -24,7 +25,7 @@ const auditBilling = (req: Request, tenantId: string, action: string, resourceId
     userId: req.user?.userId || 'system',
     userName: req.user?.userName || 'system',
     tenantId,
-    tenantType: TenantType.SOCIETY,
+    tenantType: values.tenantType || TenantType.SOCIETY,
     action,
     resource: 'Subscription',
     resourceId,
@@ -49,7 +50,8 @@ export class BillingController {
       if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
 
       const societyId = req.user?.activeTenantId;
-      if (!societyId) return res.status(403).json({ success: false, message: 'Society context missing' });
+      const tenantType = req.user?.activeTenantType || 'SOCIETY';
+      if (!societyId) return res.status(403).json({ success: false, message: 'Tenant context missing' });
       if (!isRazorpayConfigured()) {
         return res.status(503).json({ success: false, message: 'Online payments are not available right now. Please contact support.' });
       }
@@ -75,7 +77,7 @@ export class BillingController {
 
       const invoice = await Invoice.create({
         tenantId: new mongoose.Types.ObjectId(societyId),
-        tenantType: 'SOCIETY',
+        tenantType: tenantType,
         planId: plan._id,
         tenure: parsed.data.tenure,
         invoiceType: 'ONLINE_RAZORPAY',
@@ -200,7 +202,7 @@ export class BillingController {
 
       const sub = await Subscription.findOne({
         tenantId: new mongoose.Types.ObjectId(societyId),
-        tenantType: 'SOCIETY',
+        tenantType: req.user?.activeTenantType || 'SOCIETY',
         status: { $in: ['active', 'trialing', 'past_due'] },
       }).sort({ createdAt: -1 });
 
@@ -235,23 +237,25 @@ export class BillingController {
       const parsed = assignCashPlanSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
 
-      const { societyId, planId, tenure, paymentMethod, note, collectedById, collectedByName } = parsed.data;
+      const { societyId, shopId, tenantId, tenantType, planId, tenure, paymentMethod, note, collectedById, collectedByName } = parsed.data;
       const performedBy = req.user?.userName || 'Super Admin';
+      const actualTenantId = tenantId || shopId || societyId;
+      const actualTenantType = tenantType || (shopId ? 'SHOP' : 'SOCIETY');
 
-      const [plan, society] = await Promise.all([
+      const [plan, tenant] = await Promise.all([
         Plan.findOne({ _id: planId, isDeleted: false }),
-        Society.findById(societyId),
+        actualTenantType === 'SHOP' ? Shop.findById(actualTenantId) : Society.findById(actualTenantId),
       ]);
       if (!plan) return res.status(404).json({ success: false, message: 'Plan not found' });
-      if (!society) return res.status(404).json({ success: false, message: 'Society not found' });
+      if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
       if (!plan.getPricingForTenure(tenure)) return res.status(400).json({ success: false, message: 'Invalid tenure' });
 
       // Compute prorated amount/credit/mode (without applying yet).
-      const proration = await BillingController.proratePlanChange(society._id as mongoose.Types.ObjectId, plan, tenure);
+      const proration = await BillingController.proratePlanChange(tenant._id as mongoose.Types.ObjectId, actualTenantType, plan, tenure);
 
-      let recipientEmail = society.contactEmail;
-      if (!recipientEmail && society.adminUserId) {
-        const adminUser = await User.findById(society.adminUserId).select('email').lean();
+      let recipientEmail = actualTenantType === 'SHOP' ? (tenant as any).adminEmail : (tenant as any).contactEmail;
+      if (!recipientEmail && tenant.adminUserId) {
+        const adminUser = await User.findById(tenant.adminUserId).select('email').lean();
         recipientEmail = adminUser?.email;
       }
 
@@ -261,8 +265,8 @@ export class BillingController {
         if (!recipientEmail) return res.status(400).json({ success: false, message: 'This society has no contact email to send the payment link to.' });
 
         const invoice = await Invoice.create({
-          tenantId: society._id,
-          tenantType: 'SOCIETY',
+          tenantId: tenant._id,
+          tenantType: actualTenantType,
           planId: plan._id,
           tenure,
           invoiceType: 'ONLINE_RAZORPAY',
@@ -276,17 +280,17 @@ export class BillingController {
 
         const link = await RazorpayService.createPaymentLink({
           amountPaise: proration.amountPaise,
-          description: `${plan.name} (${tenure}) — ${society.name}`,
-          customer: { name: society.contactName || society.name, email: recipientEmail, contact: society.contactPhone },
-          notes: { invoiceId: invoice._id.toString(), societyId: society._id.toString() },
+          description: `${plan.name} (${tenure}) — ${tenant.name}`,
+          customer: { name: (tenant as any).contactName || tenant.name, email: recipientEmail, contact: (tenant as any).contactPhone || (tenant as any).contactNumber },
+          notes: { invoiceId: invoice._id.toString(), societyId: tenant._id.toString(), tenantType: actualTenantType },
         });
         invoice.razorpayPaymentLinkId = link.id;
         invoice.razorpayPaymentLinkUrl = (link as any).short_url;
         await invoice.save();
 
-        EmailService.sendPaymentLinkEmail(recipientEmail, society.name, plan.name, proration.amountPaise, (link as any).short_url);
-        auditBilling(req, society._id.toString(), 'SUBSCRIPTION_PAYMENT_LINK', invoice._id.toString(), {
-          mode: proration.mode, plan: plan.name, tenure, amount: proration.amountPaise, sentTo: recipientEmail, link: (link as any).short_url,
+        EmailService.sendPaymentLinkEmail(recipientEmail, tenant.name, plan.name, proration.amountPaise, (link as any).short_url);
+        auditBilling(req, tenant._id.toString(), 'SUBSCRIPTION_PAYMENT_LINK', invoice._id.toString(), {
+          tenantType: actualTenantType, mode: proration.mode, plan: plan.name, tenure, amount: proration.amountPaise, sentTo: recipientEmail, link: (link as any).short_url,
         });
 
         return res.status(200).json({
@@ -303,11 +307,11 @@ export class BillingController {
         resolvedCollectedName = u?.name;
       }
 
-      const { subscription, mode, creditPaise, amountPaise } = await BillingController.applyPlanChange(society, plan, tenure, performedBy, note);
+      const { subscription, mode, creditPaise, amountPaise } = await BillingController.applyPlanChange(tenant, actualTenantType, plan, tenure, performedBy, note);
 
       const invoice = await Invoice.create({
-        tenantId: society._id,
-        tenantType: 'SOCIETY',
+        tenantId: tenant._id,
+        tenantType: actualTenantType,
         subscriptionId: subscription._id,
         planId: plan._id,
         tenure,
@@ -326,17 +330,17 @@ export class BillingController {
       let pdfUrl: string | null = null;
       try {
         pdfUrl = await InvoiceService.generateCustomInvoice(invoice, subscription, plan, {
-          societyName: society.name, recipientEmail, tenure, currency: plan.currency,
+          societyName: tenant.name, recipientEmail, tenure, currency: plan.currency,
           collectedByName: resolvedCollectedName, recordedByName: performedBy, creditApplied: creditPaise,
         });
       } catch (pdfErr: any) {
         logger.error(`Invoice PDF generation failed for ${invoice._id}: ${pdfErr.message}`);
       }
 
-      if (recipientEmail) EmailService.sendPaymentReceiptEmail(recipientEmail, society.name, plan.name, amountPaise, tenure);
+      if (recipientEmail) EmailService.sendPaymentReceiptEmail(recipientEmail, tenant.name, plan.name, amountPaise, tenure);
 
-      auditBilling(req, society._id.toString(), 'SUBSCRIPTION_CASH_ASSIGN', subscription._id.toString(), {
-        mode, plan: plan.name, tenure, amountCollected: amountPaise, creditApplied: creditPaise,
+      auditBilling(req, tenant._id.toString(), 'SUBSCRIPTION_CASH_ASSIGN', subscription._id.toString(), {
+        tenantType: actualTenantType, mode, plan: plan.name, tenure, amountCollected: amountPaise, creditApplied: creditPaise,
         invoiceNumber: invoice.customInvoiceNumber, collectedBy: resolvedCollectedName, recordedBy: performedBy, endDate: subscription.endDate,
       });
 
@@ -387,13 +391,15 @@ export class BillingController {
     try {
       const parsed = upgradePreviewSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
-      const { societyId, planId, tenure } = parsed.data;
+      const { societyId, shopId, tenantId, tenantType, planId, tenure } = parsed.data;
+      const actualTenantId = tenantId || shopId || societyId;
+      const actualTenantType = tenantType || (shopId ? 'SHOP' : 'SOCIETY');
 
       const newPlan = await Plan.findOne({ _id: planId, isDeleted: false });
       if (!newPlan) return res.status(404).json({ success: false, message: 'Plan not found' });
       if (!newPlan.getPricingForTenure(tenure)) return res.status(400).json({ success: false, message: 'Invalid tenure' });
 
-      const p = await BillingController.proratePlanChange(societyId, newPlan, tenure);
+      const p = await BillingController.proratePlanChange(actualTenantId as string, actualTenantType, newPlan, tenure);
       let currentPlanName: string | null = null;
       let remainingDays = 0;
       if (p.existingPaid) {
@@ -426,12 +432,14 @@ export class BillingController {
   /** Paginated invoice history (society admins: own tenant; owners: all / by ?societyId=). */
   static async getInvoices(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page, pageSize, isPagination, status, societyId } = req.query;
+      const { page, pageSize, isPagination, status, societyId, shopId, tenantId, tenantType } = req.query;
       const filter: Record<string, any> = {};
 
       const isOwner = req.user?.activeRole === 'SYSTEM_OWNER' || req.user?.activeRole === 'SYSTEM_EMPLOYEE';
       if (isOwner) {
-        if (societyId) filter.tenantId = new mongoose.Types.ObjectId(String(societyId));
+        const queryTenantId = societyId || shopId || tenantId;
+        if (queryTenantId) filter.tenantId = new mongoose.Types.ObjectId(String(queryTenantId));
+        if (tenantType) filter.tenantType = String(tenantType);
       } else {
         if (!req.user?.activeTenantId) return res.status(403).json({ success: false, message: 'No tenant context' });
         filter.tenantId = new mongoose.Types.ObjectId(req.user.activeTenantId);
@@ -441,8 +449,11 @@ export class BillingController {
       const attachSocietyNames = async (rows: any[]) => {
         if (!isOwner) return rows;
         const ids = [...new Set(rows.map((r) => String(r.tenantId)))];
-        const societies = await Society.find({ _id: { $in: ids } }).select('name').lean();
-        const nameById = new Map(societies.map((s) => [String(s._id), s.name]));
+        const [societies, shops] = await Promise.all([
+          Society.find({ _id: { $in: ids } }).select('name').lean(),
+          Shop.find({ _id: { $in: ids } }).select('name').lean()
+        ]);
+        const nameById = new Map([...societies, ...shops].map((s) => [String(s._id), s.name]));
         return rows.map((r) => ({ ...r, societyName: nameById.get(String(r.tenantId)) || '—' }));
       };
 
@@ -509,16 +520,17 @@ export class BillingController {
   /** Current subscription + live limits for the logged-in society admin's tenant. */
   static async getMySubscription(req: Request, res: Response, next: NextFunction) {
     try {
-      const societyId = req.user?.activeTenantId;
-      if (!societyId) return res.status(403).json({ success: false, message: 'No tenant context' });
+      const tenantId = req.user?.activeTenantId;
+      const tenantType = req.user?.activeTenantType || 'SOCIETY';
+      if (!tenantId) return res.status(403).json({ success: false, message: 'No tenant context' });
 
-      const subscription = await getGoverningSubscription(societyId);
-      const eff = await getEffectiveLimits(societyId);
+      const subscription = await getGoverningSubscription(tenantId, tenantType);
+      const eff = await getEffectiveLimits(tenantId, tenantType);
 
       // Upcoming (scheduled / future) terms, soonest first.
       const upcoming = await Subscription.find({
-        tenantId: new mongoose.Types.ObjectId(societyId),
-        tenantType: 'SOCIETY',
+        tenantId: new mongoose.Types.ObjectId(tenantId),
+        tenantType: tenantType,
         status: 'scheduled',
       }).sort({ startDate: 1 }).populate('planId', 'name').lean();
 
@@ -534,15 +546,17 @@ export class BillingController {
     }
   }
 
-  /** Owner: paginated list of ALL subscriptions across societies. */
+  /** Owner: paginated list of ALL subscriptions across tenants. */
   static async getSubscriptions(req: Request, res: Response, next: NextFunction) {
     try {
-      const { page, pageSize, isPagination, status, societyId } = req.query;
-      const filter: Record<string, any> = { tenantType: 'SOCIETY' };
+      const { page, pageSize, isPagination, status, societyId, shopId, tenantType } = req.query;
+      const filter: Record<string, any> = {};
+      if (tenantType) filter.tenantType = tenantType;
       if (status && ['trialing', 'active', 'past_due', 'cancelled', 'expired', 'pending_payment'].includes(String(status))) {
         filter.status = status;
       }
       if (societyId) filter.tenantId = new mongoose.Types.ObjectId(String(societyId));
+      if (shopId) filter.tenantId = new mongoose.Types.ObjectId(String(shopId));
 
       const currentPage = Math.max(1, parseInt(String(page || '1'), 10));
       const limit = isPagination === 'true' ? Math.min(100, Math.max(1, parseInt(String(pageSize || '10'), 10))) : 1000;
@@ -554,8 +568,11 @@ export class BillingController {
       ]);
 
       const tenantIds = [...new Set(subs.map((s) => String(s.tenantId)))];
-      const societies = await Society.find({ _id: { $in: tenantIds } }).select('name').lean();
-      const nameById = new Map(societies.map((s) => [String(s._id), s.name]));
+      const [societies, shops] = await Promise.all([
+        Society.find({ _id: { $in: tenantIds } }).select('name').lean(),
+        Shop.find({ _id: { $in: tenantIds } }).select('name').lean()
+      ]);
+      const nameById = new Map([...societies, ...shops].map((s) => [String(s._id), s.name]));
       const data = subs.map((s) => ({ ...s, societyName: nameById.get(String(s.tenantId)) || '—' }));
 
       return res.status(200).json({
@@ -572,7 +589,6 @@ export class BillingController {
   static async getSubscriptionStats(_req: Request, res: Response, next: NextFunction) {
     try {
       const rows = await Subscription.aggregate([
-        { $match: { tenantType: 'SOCIETY' } },
         { $group: { _id: '$status', n: { $sum: 1 } } },
       ]);
       const m: Record<string, number> = {};
@@ -636,7 +652,7 @@ export class BillingController {
    * Computes mode/credit/amount/endDate for changing a society to a plan/tenure,
    * WITHOUT persisting. Shared by preview, cash apply and online link amount.
    */
-  private static async proratePlanChange(societyId: mongoose.Types.ObjectId | string, newPlan: any, tenure: string) {
+  private static async proratePlanChange(tenantId: mongoose.Types.ObjectId | string, tenantType: string, newPlan: any, tenure: string) {
     const newPricing = newPlan.getPricingForTenure(tenure);
     const newPricePaise = (newPricing?.totalPrice || 0) * 100;
     const months = newPricing?.durationMonths || 1;
@@ -644,8 +660,8 @@ export class BillingController {
 
     // Only a PAID, currently-running plan affects mode/proration (free tier is just a baseline).
     const existingPaid = await Subscription.findOne({
-      tenantId: new mongoose.Types.ObjectId(String(societyId)),
-      tenantType: 'SOCIETY',
+      tenantId: new mongoose.Types.ObjectId(String(tenantId)),
+      tenantType: tenantType,
       isFreeTier: { $ne: true },
       status: { $in: ['active', 'past_due'] },
     }).sort({ startDate: -1 });
@@ -687,14 +703,14 @@ export class BillingController {
   }
 
   /** Applies a plan change to a society (new / upgrade now / schedule upcoming), syncing Razorpay. Persists. */
-  private static async applyPlanChange(society: any, plan: any, tenure: string, performedBy: string, note?: string) {
+  private static async applyPlanChange(tenant: any, tenantType: string, plan: any, tenure: string, performedBy: string, note?: string) {
     const now = new Date();
-    const { mode, creditPaise, amountPaise, startDate, endDate } = await BillingController.proratePlanChange(society._id, plan, tenure);
+    const { mode, creditPaise, amountPaise, startDate, endDate } = await BillingController.proratePlanChange(tenant._id, tenantType, plan, tenure);
 
     // Same-plan renewal → queue a SCHEDULED upcoming term; leave the current plan running.
     if (mode === 'scheduled') {
       const sub = await Subscription.create({
-        tenantId: society._id, tenantType: 'SOCIETY', planId: plan._id, tenure,
+        tenantId: tenant._id, tenantType: tenantType, planId: plan._id, tenure,
         status: 'scheduled', startDate, endDate,
         capabilities: capsToObject(plan.capabilities), // snapshot limits at purchase
         history: [{ action: 'created', toPlanId: plan._id, note: note || `Upcoming ${plan.name} (${tenure}) scheduled to start ${startDate.toLocaleDateString('en-IN')}.`, performedBy, date: now }],
@@ -704,7 +720,7 @@ export class BillingController {
 
     // new / upgraded → supersede current active/grace/free, cancel Razorpay auto-pay, start now.
     const current = await Subscription.find({
-      tenantId: society._id, tenantType: 'SOCIETY',
+      tenantId: tenant._id, tenantType: tenantType,
       status: { $in: ['active', 'past_due', 'trialing'] },
     });
     for (const c of current) {
@@ -723,7 +739,7 @@ export class BillingController {
     }
 
     const subscription = await Subscription.create({
-      tenantId: society._id, tenantType: 'SOCIETY', planId: plan._id, tenure,
+      tenantId: tenant._id, tenantType: tenantType, planId: plan._id, tenure,
       status: 'active', startDate, endDate,
       capabilities: capsToObject(plan.capabilities), // snapshot limits at purchase
       history: [{
@@ -741,10 +757,14 @@ export class BillingController {
   /** Activates a society from a PAID online payment link (webhook + poll fallback). Idempotent. */
   private static async processPaidLinkInvoice(invoice: IInvoice, paymentId?: string) {
     if (invoice.status === 'PAID') return;
-    const [plan, society] = await Promise.all([Plan.findById(invoice.planId), Society.findById(invoice.tenantId)]);
-    if (!plan || !society) return;
+    const actualTenantType = invoice.tenantType || 'SOCIETY';
+    const [plan, tenant] = await Promise.all([
+      Plan.findById(invoice.planId),
+      actualTenantType === 'SHOP' ? Shop.findById(invoice.tenantId) : Society.findById(invoice.tenantId),
+    ]);
+    if (!plan || !tenant) return;
 
-    const { subscription, creditPaise } = await BillingController.applyPlanChange(society, plan, invoice.tenure || 'monthly', 'Online Payment');
+    const { subscription, creditPaise } = await BillingController.applyPlanChange(tenant, actualTenantType, plan, invoice.tenure || 'monthly', 'Online Payment');
 
     invoice.status = 'PAID';
     invoice.paidAt = new Date();
@@ -753,16 +773,16 @@ export class BillingController {
     invoice.creditApplied = creditPaise;
     await invoice.save();
 
-    const { email, name } = await resolveSocietyEmail(society._id as mongoose.Types.ObjectId);
+    const { email, name } = await resolveTenantEmail(tenant._id as mongoose.Types.ObjectId, actualTenantType);
     try {
       await InvoiceService.generateCustomInvoice(invoice, subscription, plan, {
-        societyName: name || society.name, recipientEmail: email, tenure: invoice.tenure || 'monthly',
+        societyName: name || tenant.name, recipientEmail: email, tenure: invoice.tenure || 'monthly',
         recordedByName: 'Online Payment', creditApplied: creditPaise, currency: plan.currency,
       });
     } catch (e: any) {
       logger.error(`PDF generation for paid link invoice ${invoice._id} failed: ${e.message}`);
     }
-    if (email) EmailService.sendPaymentReceiptEmail(email, name || society.name, plan.name, invoice.amount, invoice.tenure || 'monthly');
+    if (email) EmailService.sendPaymentReceiptEmail(email, name || tenant.name, plan.name, invoice.amount, invoice.tenure || 'monthly');
     logger.info(`Payment-link invoice ${invoice._id} processed & plan activated.`);
   }
 
@@ -829,7 +849,7 @@ export class BillingController {
     await invoice.save();
 
     if (invoice.tenantType === 'SOCIETY') {
-      const { email, name } = await resolveSocietyEmail(invoice.tenantId);
+      const { email, name } = await resolveTenantEmail(invoice.tenantId, invoice.tenantType);
       if (email) EmailService.sendPaymentReceiptEmail(email, name, plan.name, invoice.amount, tenure);
     }
 
@@ -879,7 +899,7 @@ export class BillingController {
     await localSub.save();
 
     if (plan && localSub.tenantType === 'SOCIETY') {
-      const { email, name } = await resolveSocietyEmail(localSub.tenantId);
+      const { email, name } = await resolveTenantEmail(localSub.tenantId, localSub.tenantType);
       if (email) EmailService.sendPaymentReceiptEmail(email, name, plan.name, (pricing?.totalPrice || 0) * 100, localSub.tenure);
     }
   }

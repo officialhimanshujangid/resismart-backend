@@ -1,5 +1,5 @@
 {
-  "name": "resismart-backend",
+  "name": "Resismart-backend",
   "version": "1.0.0",
   "description": "Secure, multi-tenant society and shop management platform backend",
   "main": "dist/server.js",

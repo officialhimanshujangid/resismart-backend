@@ -44,7 +44,16 @@ export class InvoiceService {
     await invoice.save();
 
     if (ctx.recipientEmail) {
-      EmailService.sendInvoiceEmail(ctx.recipientEmail, ctx.societyName, invoice.customInvoiceNumber || '', pdfUrl);
+      const key = s3Service.keyFromUrl(pdfUrl);
+      let emailLink = pdfUrl;
+      if (key) {
+        // Generate a presigned URL valid for 7 days (max limit)
+        emailLink = await s3Service.getSignedDownloadUrl(key, { 
+          expiresIn: 7 * 24 * 60 * 60,
+          downloadName: `${invoice.customInvoiceNumber || 'invoice'}.pdf`
+        });
+      }
+      EmailService.sendInvoiceEmail(ctx.recipientEmail, ctx.societyName, invoice.customInvoiceNumber || '', emailLink);
     }
 
     logger.info(`Custom invoice generated: ${invoice.customInvoiceNumber} -> ${pdfUrl}`);

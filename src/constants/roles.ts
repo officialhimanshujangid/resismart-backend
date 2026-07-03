@@ -18,6 +18,7 @@ export enum UserRole {
   FAMILY_MEMBER = 'FAMILY_MEMBER',
 
   // Shop Level
+  SHOP_ADMIN = 'SHOP_ADMIN',
   SHOP_OWNER = 'SHOP_OWNER',
   SHOP_CLIENT = 'SHOP_CLIENT',
 }
@@ -31,4 +32,4 @@ export const SOCIETY_LEVEL_ROLES = [
   UserRole.SOCIETY_EMPLOYEE,
   UserRole.FAMILY_MEMBER,
 ];
-export const SHOP_LEVEL_ROLES = [UserRole.SHOP_OWNER, UserRole.SHOP_CLIENT];
+export const SHOP_LEVEL_ROLES = [UserRole.SHOP_ADMIN, UserRole.SHOP_OWNER, UserRole.SHOP_CLIENT];

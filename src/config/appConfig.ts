@@ -27,7 +27,7 @@ export const appConfig = {
   port: parseInt(process.env.PORT || '5000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
   isProduction,
-  appName: process.env.APP_NAME || 'ResiSmart',
+  appName: process.env.APP_NAME || 'Resismart',
   supportEmail: process.env.SUPPORT_EMAIL || 'support@resismart.com',
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:4444',
   mongoUri: process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/resismart',

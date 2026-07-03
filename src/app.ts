@@ -6,6 +6,7 @@ import rateLimit from 'express-rate-limit';
 
 import authRoutes from './routes/auth.routes';
 import societyRoutes from './routes/society.routes';
+import shopRoutes from './routes/shop.routes';
 import rentalRoutes from './routes/rental.routes';
 import auditRoutes from './routes/audit.routes';
 import designationRoutes from './routes/designation.routes';
@@ -15,6 +16,7 @@ import uploadRoutes from './routes/upload.routes';
 import planRoutes from './routes/plan.routes';
 import billingRoutes from './routes/billing.routes';
 import settingsRoutes from './routes/settings.routes';
+import dashboardRoutes from './routes/dashboard.routes';
 import webhookRoutes from './routes/webhook.routes';
 import { errorHandler } from './middlewares/error.middleware';
 import { requestLogger } from './middlewares/logger.middleware';
@@ -73,12 +75,13 @@ app.use('/api', generalLimiter);
 
 // 8. Base route
 app.get('/', (_req, res) => {
-  res.json({ status: 'online', platform: process.env.APP_NAME || 'ResiSmart' });
+  res.json({ status: 'online', platform: process.env.APP_NAME || 'Resismart' });
 });
 
 // 9. Mount Modules
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/societies', societyRoutes);
+app.use('/api/v1/shops', shopRoutes);
 app.use('/api/v1/rentals', rentalRoutes);
 app.use('/api/v1/audits', auditRoutes);
 app.use('/api/v1/designations', designationRoutes);
@@ -88,6 +91,7 @@ app.use('/api/v1/upload', uploadRoutes);
 app.use('/api/v1/plans', planRoutes);
 app.use('/api/v1/billing', billingRoutes);
 app.use('/api/v1/settings', settingsRoutes);
+app.use('/api/v1/dashboard', dashboardRoutes);
 
 // 10. JSON 404 for unknown routes
 app.use((req, res) => {

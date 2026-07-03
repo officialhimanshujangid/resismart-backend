@@ -3,7 +3,7 @@ import { Subscription } from '../models/subscription.model';
 import { GlobalSetting } from '../models/global-setting.model';
 import { Plan } from '../models/plan.model';
 import EmailService from './email.service';
-import { resolveSocietyEmail } from '../utils/society-email.util';
+import { resolveTenantEmail } from '../utils/tenant-email.util';
 import { assignFreeTier } from './subscription-lifecycle.service';
 import { logger } from '../utils/logger.util';
 
@@ -31,7 +31,7 @@ export async function runExpiryReminders(): Promise<void> {
 
     let sent = 0;
     for (const sub of subs) {
-      const { email, name } = await resolveSocietyEmail(sub.tenantId);
+      const { email, name } = await resolveTenantEmail(sub.tenantId, sub.tenantType);
       if (!email) continue;
       EmailService.sendSubscriptionExpiryReminder(email, name, await planNameFor(sub.planId, sub.tenure), n, sub.endDate);
       sent++;
@@ -55,7 +55,7 @@ export async function runPromoteScheduled(): Promise<void> {
     sub.history.push({ action: 'activated', note: 'Scheduled plan started.', performedBy: 'system', date: now } as any);
     await sub.save();
 
-    const { email, name } = await resolveSocietyEmail(sub.tenantId);
+    const { email, name } = await resolveTenantEmail(sub.tenantId, sub.tenantType);
     if (email) EmailService.sendPaymentReceiptEmail(email, name, await planNameFor(sub.planId, sub.tenure), 0, sub.tenure);
   }
   if (due.length) logger.info(`[cron] Activated ${due.length} scheduled subscription(s)`);
@@ -82,7 +82,7 @@ export async function runExpireOverdue(): Promise<void> {
     sub.history.push({ action: 'suspended', note: `Plan term ended; grace period until ${graceEnds.toLocaleDateString('en-IN')}.`, performedBy: 'system', date: now } as any);
     await sub.save();
 
-    const { email, name } = await resolveSocietyEmail(sub.tenantId);
+    const { email, name } = await resolveTenantEmail(sub.tenantId, sub.tenantType);
     if (email) EmailService.sendSubscriptionExpiryReminder(email, name, await planNameFor(sub.planId, sub.tenure), graceDays, graceEnds);
   }
 
@@ -97,7 +97,7 @@ export async function runExpireOverdue(): Promise<void> {
     await assignFreeTier(sub.tenantId);
     revertedCount++;
 
-    const { email, name } = await resolveSocietyEmail(sub.tenantId);
+    const { email, name } = await resolveTenantEmail(sub.tenantId, sub.tenantType);
     if (email) EmailService.sendSubscriptionExpiredEmail(email, name, await planNameFor(sub.planId, sub.tenure));
   }
 

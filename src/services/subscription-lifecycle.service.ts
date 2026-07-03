@@ -56,19 +56,19 @@ export async function ensureFreeTierPlan(): Promise<any> {
  * Ensures a society has the perpetual free-tier subscription active.
  * Idempotent — skips if a non-cancelled free-tier sub already governs access.
  */
-export async function assignFreeTier(societyId: mongoose.Types.ObjectId | string, performedBy = 'system'): Promise<any> {
-  const tenantId = new mongoose.Types.ObjectId(String(societyId));
+export async function assignFreeTier(tenantIdRaw: mongoose.Types.ObjectId | string, tenantType: string = 'SOCIETY', performedBy = 'system'): Promise<any> {
+  const tenantId = new mongoose.Types.ObjectId(String(tenantIdRaw));
   const plan = await ensureFreeTierPlan();
 
   const existingFree = await Subscription.findOne({
-    tenantId, tenantType: 'SOCIETY', isFreeTier: true, status: { $in: ['trialing', 'active'] },
+    tenantId, tenantType, isFreeTier: true, status: { $in: ['trialing', 'active'] },
   });
   if (existingFree) return existingFree;
 
   const now = new Date();
   return Subscription.create({
     tenantId,
-    tenantType: 'SOCIETY',
+    tenantType,
     planId: plan._id,
     tenure: 'trial',
     status: 'trialing',
@@ -80,17 +80,17 @@ export async function assignFreeTier(societyId: mongoose.Types.ObjectId | string
 }
 
 /**
- * The subscription currently GOVERNING access for a society:
+ * The subscription currently GOVERNING access for a tenant:
  * a paid active/past_due (grace) sub if present, otherwise the free tier.
  * Excludes future 'scheduled' subs. Creates the free tier if nothing exists.
  */
-export async function getGoverningSubscription(societyId: mongoose.Types.ObjectId | string): Promise<any> {
-  const tenantId = new mongoose.Types.ObjectId(String(societyId));
+export async function getGoverningSubscription(tenantIdRaw: mongoose.Types.ObjectId | string, tenantType: string = 'SOCIETY'): Promise<any> {
+  const tenantId = new mongoose.Types.ObjectId(String(tenantIdRaw));
   const now = new Date();
 
   // Prefer a paid, currently-running sub (active or in grace).
   const paid = await Subscription.findOne({
-    tenantId, tenantType: 'SOCIETY', isFreeTier: { $ne: true },
+    tenantId, tenantType, isFreeTier: { $ne: true },
     status: { $in: ['active', 'past_due'] },
     startDate: { $lte: now },
   }).sort({ startDate: -1 }).populate('planId');
@@ -98,21 +98,22 @@ export async function getGoverningSubscription(societyId: mongoose.Types.ObjectI
 
   // Otherwise the free tier (create if missing).
   let free = await Subscription.findOne({
-    tenantId, tenantType: 'SOCIETY', isFreeTier: true, status: { $in: ['trialing', 'active'] },
+    tenantId, tenantType, isFreeTier: true, status: { $in: ['trialing', 'active'] },
   }).populate('planId');
+
   if (!free) {
-    await assignFreeTier(tenantId);
-    free = await Subscription.findOne({
-      tenantId, tenantType: 'SOCIETY', isFreeTier: true, status: { $in: ['trialing', 'active'] },
-    }).populate('planId');
+    // Should generally be created at approval time, but just in case:
+    free = await assignFreeTier(tenantIdRaw, tenantType);
+    free = await Subscription.findById(free?._id).populate('planId');
   }
+
   return free;
 }
 
 /**
  * Effective capability limits + plan context for enforcement.
  */
-export async function getEffectiveLimits(societyId: mongoose.Types.ObjectId | string): Promise<{
+export async function getEffectiveLimits(tenantIdRaw: mongoose.Types.ObjectId | string, tenantType: string = 'SOCIETY'): Promise<{
   limits: Record<string, any>;
   planName: string;
   status: string;
@@ -120,7 +121,7 @@ export async function getEffectiveLimits(societyId: mongoose.Types.ObjectId | st
   endDate?: Date;
   graceEndsAt?: Date;
 }> {
-  const sub = await getGoverningSubscription(societyId);
+  const sub = await getGoverningSubscription(tenantIdRaw, tenantType);
   if (!sub) {
     return { limits: await getFreeTierCaps(), planName: 'Free', status: 'none', isFreeTier: true };
   }

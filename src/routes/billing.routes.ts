@@ -7,17 +7,17 @@ const router = Router();
 
 const OWNER = [UserRole.SYSTEM_OWNER, UserRole.SYSTEM_EMPLOYEE];
 
-// --- Society admin billing (own tenant) ---
-router.post('/checkout', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), BillingController.checkoutRazorpay);
-router.post('/verify-payment', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), BillingController.verifyPayment);
-router.get('/my-subscription', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), BillingController.getMySubscription);
-router.post('/cancel', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), BillingController.cancelSubscription);
+// --- Tenant admin billing (own tenant) ---
+router.post('/checkout', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN]), BillingController.checkoutRazorpay);
+router.post('/verify-payment', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN]), BillingController.verifyPayment);
+router.get('/my-subscription', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN]), BillingController.getMySubscription);
+router.post('/cancel', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN]), BillingController.cancelSubscription);
 
-// Invoice history — society admins (own tenant) and owners (any / by ?societyId=)
-router.get('/invoices/stats', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, ...OWNER]), BillingController.getInvoiceStats);
-router.get('/invoices', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, ...OWNER]), BillingController.getInvoices);
-router.get('/invoices/:id/download', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, ...OWNER]), BillingController.getInvoiceDownload);
-router.get('/invoices/:id/status', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, ...OWNER]), BillingController.getInvoiceStatus);
+// Invoice history — admins (own tenant) and owners (any / by ?tenantId=)
+router.get('/invoices/stats', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.getInvoiceStats);
+router.get('/invoices', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.getInvoices);
+router.get('/invoices/:id/download', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.getInvoiceDownload);
+router.get('/invoices/:id/status', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.getInvoiceStatus);
 
 // --- Owner only ---
 router.post('/upgrade-preview', authenticateJWT, authorizeRoles(OWNER), BillingController.upgradePreview);
