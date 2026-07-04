@@ -63,13 +63,16 @@ export class RazorpayService {
    * Creates a Razorpay Subscription against a plan. The customer authorizes a
    * mandate at checkout and is then auto-charged each cycle until cancelled.
    */
-  static async createSubscription(opts: { razorpayPlanId: string; totalCount: number; notes?: Record<string, string> }) {
-    const sub = await this.getClient().subscriptions.create({
+  static async createSubscription(opts: { razorpayPlanId: string; totalCount: number; notes?: Record<string, string>; startAt?: number }) {
+    const payload: any = {
       plan_id: opts.razorpayPlanId,
       total_count: opts.totalCount,
       customer_notify: 1,
       notes: opts.notes || {},
-    } as any);
+    };
+    if (opts.startAt) payload.start_at = opts.startAt;
+    
+    const sub = await this.getClient().subscriptions.create(payload);
     logger.info(`Razorpay subscription created: ${sub.id}`);
     return sub;
   }

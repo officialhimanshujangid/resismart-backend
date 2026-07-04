@@ -19,9 +19,12 @@ router.get('/invoices', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN,
 router.get('/invoices/:id/download', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.getInvoiceDownload);
 router.get('/invoices/:id/status', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.getInvoiceStatus);
 
+// --- Shared (Owner + Tenant Admins) ---
+router.post('/upgrade-preview', authenticateJWT, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SHOP_ADMIN, ...OWNER]), BillingController.upgradePreview);
+
 // --- Owner only ---
-router.post('/upgrade-preview', authenticateJWT, authorizeRoles(OWNER), BillingController.upgradePreview);
 router.post('/assign-cash', authenticateJWT, authorizeRoles(OWNER), BillingController.assignCashPlan);
+router.post('/generate-renewal-link', authenticateJWT, authorizeRoles(OWNER), BillingController.generateRenewalLink);
 router.get('/subscriptions/stats', authenticateJWT, authorizeRoles(OWNER), BillingController.getSubscriptionStats);
 router.get('/subscriptions', authenticateJWT, authorizeRoles(OWNER), BillingController.getSubscriptions);
 router.post('/run-maintenance', authenticateJWT, authorizeRoles(OWNER), BillingController.runMaintenance);

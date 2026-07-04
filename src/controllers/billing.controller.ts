@@ -18,7 +18,7 @@ import { runExpireOverdue, runExpiryReminders } from '../services/cron.service';
 import { TenantType } from '../constants/roles';
 import { appConfig, isRazorpayConfigured } from '../config/appConfig';
 import { logger } from '../utils/logger.util';
-import { checkoutSchema, verifyPaymentSchema, assignCashPlanSchema, upgradePreviewSchema } from '../validators/billing.validator';
+import { checkoutSchema, verifyPaymentSchema, assignCashPlanSchema, upgradePreviewSchema, generateRenewalLinkSchema } from '../validators/billing.validator';
 
 const auditBilling = (req: Request, tenantId: string, action: string, resourceId: string, values: any) => {
   AuditService.log({
@@ -49,6 +49,7 @@ export class BillingController {
       const parsed = checkoutSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
 
+      const { planId, tenure, intent } = parsed.data;
       const societyId = req.user?.activeTenantId;
       const tenantType = req.user?.activeTenantType || 'SOCIETY';
       if (!societyId) return res.status(403).json({ success: false, message: 'Tenant context missing' });
@@ -56,53 +57,73 @@ export class BillingController {
         return res.status(503).json({ success: false, message: 'Online payments are not available right now. Please contact support.' });
       }
 
-      const plan = await Plan.findOne({ _id: parsed.data.planId, isActive: true, isDeleted: false });
+      const plan = await Plan.findOne({ _id: planId, isActive: true, isDeleted: false });
       if (!plan) return res.status(404).json({ success: false, message: 'Plan not found' });
 
-      let cycle = plan.billingCycles.find((c) => c.tenure === parsed.data.tenure && c.isEnabled);
+      let cycle = plan.billingCycles.find((c) => c.tenure === tenure && c.isEnabled);
       if (!cycle) return res.status(400).json({ success: false, message: 'This billing cycle is not available for this plan' });
 
       // Self-heal: legacy plans created before Razorpay sync may lack a plan id.
       if (!cycle.razorpayPlanId) {
         await ensureRazorpayPlans(plan);
-        cycle = plan.billingCycles.find((c) => c.tenure === parsed.data.tenure && c.isEnabled);
+        cycle = plan.billingCycles.find((c) => c.tenure === tenure && c.isEnabled);
       }
       if (!cycle?.razorpayPlanId) {
         return res.status(400).json({ success: false, message: 'This plan is not yet set up for online subscriptions. Please try again shortly or contact support.' });
       }
 
-      const pricing = plan.getPricingForTenure(parsed.data.tenure);
+      const pricing = plan.getPricingForTenure(tenure);
       if (!pricing) return res.status(400).json({ success: false, message: 'Invalid tenure for this plan' });
-      const amountInPaise = pricing.totalPrice * 100;
+
+      const proration = await BillingController.proratePlanChange(new mongoose.Types.ObjectId(societyId), tenantType, plan, tenure);
+      
+      let amountInPaise = proration.amountPaise;
+      let isOrder = intent === 'manual_renewal' || intent === 'upgrade';
+      let startAt: number | undefined;
+
+      if (intent === 'setup_autopay' && proration.existingPaid) {
+        amountInPaise = 0;
+        startAt = Math.floor(new Date(proration.existingPaid.endDate).getTime() / 1000);
+        isOrder = false;
+      }
 
       const invoice = await Invoice.create({
         tenantId: new mongoose.Types.ObjectId(societyId),
         tenantType: tenantType,
         planId: plan._id,
-        tenure: parsed.data.tenure,
+        tenure: tenure,
         invoiceType: 'ONLINE_RAZORPAY',
         amount: amountInPaise,
         status: 'PENDING',
       });
 
-      const rzpSub = await RazorpayService.createSubscription({
-        razorpayPlanId: cycle.razorpayPlanId,
-        totalCount: TOTAL_COUNT[parsed.data.tenure] || 12,
-        notes: { invoiceId: invoice._id.toString(), societyId: String(societyId) },
-      });
-
-      invoice.razorpaySubscriptionId = rzpSub.id;
-      await invoice.save();
-
-      return res.status(200).json({
+      let responsePayload: any = {
         success: true,
-        subscriptionId: rzpSub.id,
         keyId: appConfig.razorpayKeyId,
         invoiceId: invoice._id,
         planName: plan.name,
         amount: amountInPaise,
         currency: plan.currency || 'INR',
-      });
+      };
+
+      if (isOrder && amountInPaise > 0) {
+        const order = await RazorpayService.createOrder(amountInPaise, invoice._id.toString());
+        invoice.razorpayPaymentLinkId = order.id; // re-using this field for order_id
+        await invoice.save();
+        responsePayload.orderId = order.id;
+      } else {
+        const rzpSub = await RazorpayService.createSubscription({
+          razorpayPlanId: cycle.razorpayPlanId,
+          totalCount: TOTAL_COUNT[tenure] || 12,
+          startAt,
+          notes: { invoiceId: invoice._id.toString(), societyId: String(societyId) },
+        });
+        invoice.razorpaySubscriptionId = rzpSub.id;
+        await invoice.save();
+        responsePayload.subscriptionId = rzpSub.id;
+      }
+
+      return res.status(200).json(responsePayload);
     } catch (error: any) {
       logger.error(`checkoutRazorpay failed: ${error.message}`);
       next(error);
@@ -118,7 +139,7 @@ export class BillingController {
       const parsed = verifyPaymentSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
 
-      const { invoiceId, razorpay_subscription_id, razorpay_payment_id, razorpay_signature } = parsed.data;
+      const { invoiceId, razorpay_subscription_id, razorpay_order_id, razorpay_payment_id, razorpay_signature } = parsed.data;
       const societyId = req.user?.activeTenantId;
 
       const invoice = await Invoice.findById(invoiceId);
@@ -126,18 +147,28 @@ export class BillingController {
       if (societyId && invoice.tenantId.toString() !== societyId) {
         return res.status(403).json({ success: false, message: 'This invoice does not belong to your society' });
       }
-      if (invoice.razorpaySubscriptionId !== razorpay_subscription_id) {
-        return res.status(400).json({ success: false, message: 'Subscription mismatch' });
+      
+      let valid = false;
+      if (razorpay_order_id) {
+        if (invoice.razorpayPaymentLinkId !== razorpay_order_id) {
+          return res.status(400).json({ success: false, message: 'Order mismatch' });
+        }
+        valid = RazorpayService.verifyPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature);
+      } else if (razorpay_subscription_id) {
+        if (invoice.razorpaySubscriptionId !== razorpay_subscription_id) {
+          return res.status(400).json({ success: false, message: 'Subscription mismatch' });
+        }
+        valid = RazorpayService.verifySubscriptionSignature(razorpay_subscription_id, razorpay_payment_id, razorpay_signature);
       }
-
-      const valid = RazorpayService.verifySubscriptionSignature(razorpay_subscription_id, razorpay_payment_id, razorpay_signature);
+      
       if (!valid) return res.status(400).json({ success: false, message: 'Payment signature verification failed' });
 
+      // activateFromInvoice works for both orders and subscriptions since it applies the prorated change.
       const subscription = await BillingController.activateFromInvoice(invoice, razorpay_payment_id, req.user?.userName || 'Society Admin', razorpay_subscription_id);
 
       if (subscription) {
         auditBilling(req, invoice.tenantId.toString(), 'SUBSCRIPTION_ACTIVATE', subscription._id.toString(), {
-          via: 'razorpay', paymentId: razorpay_payment_id, subscriptionId: razorpay_subscription_id, amount: invoice.amount,
+          via: 'razorpay', paymentId: razorpay_payment_id, subscriptionId: razorpay_subscription_id, orderId: razorpay_order_id, amount: invoice.amount,
         });
       }
 
@@ -203,10 +234,11 @@ export class BillingController {
       const sub = await Subscription.findOne({
         tenantId: new mongoose.Types.ObjectId(societyId),
         tenantType: req.user?.activeTenantType || 'SOCIETY',
-        status: { $in: ['active', 'trialing', 'past_due'] },
+        status: { $in: ['active', 'trialing', 'past_due', 'scheduled'] },
+        razorpaySubscriptionId: { $exists: true, $ne: null }
       }).sort({ createdAt: -1 });
 
-      if (!sub) return res.status(404).json({ success: false, message: 'No active subscription to cancel' });
+      if (!sub) return res.status(404).json({ success: false, message: 'No active auto-pay found to cancel' });
 
       if (sub.razorpaySubscriptionId && isRazorpayConfigured()) {
         try {
@@ -216,11 +248,16 @@ export class BillingController {
         }
       }
 
-      sub.status = 'cancelled';
-      sub.history.push({ action: 'cancelled', note: 'Cancelled by society admin', performedBy: req.user?.userName || 'Society Admin', date: new Date() } as any);
+      // Do not change status to 'cancelled' so the user can use the remaining paid days.
+      // Just remove the razorpaySubscriptionId to stop auto-renewal.
+      sub.razorpaySubscriptionId = undefined;
+      
+      // If the subscription was purely a scheduled mandate (no charges made), we can cancel it fully?
+      // Wait, if it's scheduled and hasn't started, they didn't pay for it yet. But let's leave it as scheduled but without autopay, so it just becomes a pending scheduled plan.
+      sub.history.push({ action: 'cancelled_autopay', note: 'Auto-renewal cancelled by society admin', performedBy: req.user?.userName || 'Society Admin', date: new Date() } as any);
       await sub.save();
 
-      auditBilling(req, String(societyId), 'SUBSCRIPTION_CANCEL', sub._id.toString(), { cancelledBy: req.user?.userName });
+      auditBilling(req, String(societyId), 'SUBSCRIPTION_CANCEL_AUTOPAY', sub._id.toString(), { cancelledBy: req.user?.userName });
 
       return res.status(200).json({ success: true, message: 'Subscription cancelled.', subscription: sub });
     } catch (error: any) {
@@ -391,15 +428,25 @@ export class BillingController {
     try {
       const parsed = upgradePreviewSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
-      const { societyId, shopId, tenantId, tenantType, planId, tenure } = parsed.data;
-      const actualTenantId = tenantId || shopId || societyId;
-      const actualTenantType = tenantType || (shopId ? 'SHOP' : 'SOCIETY');
+      const { societyId, shopId, tenantId, tenantType, planId, tenure, intent } = parsed.data;
+      const actualTenantId = tenantId || shopId || societyId || req.user?.activeTenantId;
+      const actualTenantType = tenantType || (shopId ? 'SHOP' : (req.user?.activeTenantType || 'SOCIETY'));
+
+      const isOwner = req.user?.activeRole === 'SYSTEM_OWNER' || req.user?.activeRole === 'SYSTEM_EMPLOYEE';
+      if (!isOwner && actualTenantId !== req.user?.activeTenantId) {
+        return res.status(403).json({ success: false, message: 'You can only preview upgrades for your own society.' });
+      }
 
       const newPlan = await Plan.findOne({ _id: planId, isDeleted: false });
       if (!newPlan) return res.status(404).json({ success: false, message: 'Plan not found' });
       if (!newPlan.getPricingForTenure(tenure)) return res.status(400).json({ success: false, message: 'Invalid tenure' });
 
       const p = await BillingController.proratePlanChange(actualTenantId as string, actualTenantType, newPlan, tenure);
+      
+      if (intent === 'setup_autopay' && p.existingPaid) {
+        p.amountPaise = 0;
+      }
+      
       let currentPlanName: string | null = null;
       let remainingDays = 0;
       if (p.existingPaid) {
@@ -534,12 +581,22 @@ export class BillingController {
         status: 'scheduled',
       }).sort({ startDate: 1 }).populate('planId', 'name').lean();
 
+      let nextAmountPaise = 0;
+      if (subscription && subscription.planId && !subscription.isFreeTier) {
+        const planDoc = subscription.planId as any;
+        if (planDoc.getPricingForTenure) {
+          const pricing = planDoc.getPricingForTenure(subscription.tenure);
+          if (pricing) nextAmountPaise = pricing.totalPrice * 100;
+        }
+      }
+
       return res.status(200).json({
         success: true,
         subscription,
         upcoming,
         capabilities: eff.limits,
         planStatus: { planName: eff.planName, status: eff.status, isFreeTier: eff.isFreeTier, endDate: eff.endDate, graceEndsAt: eff.graceEndsAt },
+        nextAmountPaise,
       });
     } catch (error: any) {
       next(error);
@@ -658,13 +715,13 @@ export class BillingController {
     const months = newPricing?.durationMonths || 1;
     const now = new Date();
 
-    // Only a PAID, currently-running plan affects mode/proration (free tier is just a baseline).
+    // Only a PAID, currently-running or upcoming plan affects mode/proration (free tier is just a baseline).
     const existingPaid = await Subscription.findOne({
       tenantId: new mongoose.Types.ObjectId(String(tenantId)),
       tenantType: tenantType,
       isFreeTier: { $ne: true },
-      status: { $in: ['active', 'past_due'] },
-    }).sort({ startDate: -1 });
+      status: { $in: ['active', 'past_due', 'scheduled'] },
+    }).sort({ endDate: -1 });
 
     let mode: 'new' | 'scheduled' | 'upgraded' = 'new';
     let creditPaise = 0;
@@ -707,27 +764,42 @@ export class BillingController {
     const now = new Date();
     const { mode, creditPaise, amountPaise, startDate, endDate } = await BillingController.proratePlanChange(tenant._id, tenantType, plan, tenure);
 
-    // Same-plan renewal → queue a SCHEDULED upcoming term; leave the current plan running.
+    // Find any currently running plans (active, past_due, trialing)
+    const current = await Subscription.find({
+      tenantId: tenant._id, tenantType: tenantType,
+      status: { $in: ['active', 'past_due', 'trialing'] },
+    });
+
+    // If there is ANY active Razorpay subscription, we MUST cancel it at the gateway 
+    // to prevent double billing, regardless of whether this is a scheduled renewal or upgrade.
+    for (const c of current) {
+      if (c.razorpaySubscriptionId && isRazorpayConfigured()) {
+        try { 
+          await RazorpayService.cancelSubscription(c.razorpaySubscriptionId, false); 
+          c.history.push({
+            action: 'cancelled',
+            note: 'Razorpay auto-renewal cancelled automatically due to manual offline plan assignment.',
+            performedBy: 'System', date: now
+          } as any);
+          await c.save();
+        }
+        catch (e: any) { logger.error(`Razorpay cancel during plan change failed: ${e.message}`); }
+      }
+    }
+
+    // Same-plan renewal → queue a SCHEDULED upcoming term; leave the current plan running locally.
     if (mode === 'scheduled') {
       const sub = await Subscription.create({
         tenantId: tenant._id, tenantType: tenantType, planId: plan._id, tenure,
         status: 'scheduled', startDate, endDate,
         capabilities: capsToObject(plan.capabilities), // snapshot limits at purchase
-        history: [{ action: 'created', toPlanId: plan._id, note: note || `Upcoming ${plan.name} (${tenure}) scheduled to start ${startDate.toLocaleDateString('en-IN')}.`, performedBy, date: now }],
+        history: [{ action: 'created', toPlanId: plan._id, note: `Upcoming ${plan.name} (${tenure}) offline plan scheduled. It will automatically activate on ${startDate.toLocaleDateString('en-IN')}.`, performedBy, date: now }],
       });
       return { subscription: sub, mode, creditPaise, amountPaise };
     }
 
-    // new / upgraded → supersede current active/grace/free, cancel Razorpay auto-pay, start now.
-    const current = await Subscription.find({
-      tenantId: tenant._id, tenantType: tenantType,
-      status: { $in: ['active', 'past_due', 'trialing'] },
-    });
+    // new / upgraded → supersede current active/grace/free locally, start now.
     for (const c of current) {
-      if (c.razorpaySubscriptionId && isRazorpayConfigured()) {
-        try { await RazorpayService.cancelSubscription(c.razorpaySubscriptionId, false); }
-        catch (e: any) { logger.error(`Razorpay cancel during plan change failed: ${e.message}`); }
-      }
       c.status = 'expired';
       c.history.push({
         action: mode === 'upgraded' ? 'upgraded' : 'cancelled',
@@ -746,8 +818,8 @@ export class BillingController {
         action: mode === 'upgraded' ? 'upgraded' : 'cash_plan_assigned',
         toPlanId: plan._id,
         note: note || (mode === 'upgraded'
-          ? `Upgraded to ${plan.name} (${tenure}). Credit ₹${(creditPaise / 100).toFixed(2)} applied.`
-          : `Activated ${plan.name} (${tenure}).`),
+          ? `Upgraded to ${plan.name} (${tenure}) immediately. Unused balance of ₹${(creditPaise / 100).toFixed(2)} credited.`
+          : `Activated new ${plan.name} (${tenure}) offline plan immediately.`),
         performedBy, date: now,
       }],
     });
@@ -795,63 +867,50 @@ export class BillingController {
       return Subscription.findById(invoice.subscriptionId);
     }
 
-    const plan = await Plan.findById(invoice.planId);
-    if (!plan) throw new Error('Plan referenced by invoice no longer exists');
-    const tenure = invoice.tenure || 'monthly';
-    const pricing = plan.getPricingForTenure(tenure);
-    const durationMonths = pricing?.durationMonths || 1;
+    const actualTenantType = invoice.tenantType || 'SOCIETY';
+    const [plan, tenant] = await Promise.all([
+      Plan.findById(invoice.planId),
+      actualTenantType === 'SHOP' ? Shop.findById(invoice.tenantId) : Society.findById(invoice.tenantId),
+    ]);
+    if (!plan || !tenant) throw new Error('Plan or Tenant not found');
 
-    // Cancel any prior live subscriptions — both locally AND at Razorpay so the
-    // old mandate stops auto-charging (avoids a plan upgraded locally but still
-    // billing on the old Razorpay subscription).
-    const priorSubs = await Subscription.find({
-      tenantId: invoice.tenantId,
-      tenantType: invoice.tenantType,
-      status: { $in: ['trialing', 'active'] },
-      razorpaySubscriptionId: { $exists: true, $ne: null },
-    });
-    for (const prior of priorSubs) {
-      if (prior.razorpaySubscriptionId && prior.razorpaySubscriptionId !== razorpaySubscriptionId && isRazorpayConfigured()) {
-        try {
-          await RazorpayService.cancelSubscription(prior.razorpaySubscriptionId, false);
-        } catch (e: any) {
-          logger.error(`Failed to cancel superseded Razorpay sub ${prior.razorpaySubscriptionId}: ${e.message}`);
-        }
-      }
+    const { subscription, creditPaise } = await BillingController.applyPlanChange(tenant, actualTenantType, plan, invoice.tenure || 'monthly', performedBy);
+
+    // Attach razorpay subscription ID to the newly created local subscription
+    const finalRzpSubId = razorpaySubscriptionId || invoice.razorpaySubscriptionId;
+    if (finalRzpSubId) {
+      subscription.razorpaySubscriptionId = finalRzpSubId;
+      await subscription.save();
     }
-
-    await Subscription.updateMany(
-      { tenantId: invoice.tenantId, tenantType: invoice.tenantType, status: { $in: ['trialing', 'active'] } },
-      { $set: { status: 'cancelled' }, $push: { history: { action: 'cancelled', note: 'Superseded by online subscription', performedBy, date: new Date() } } }
-    );
-
-    const startDate = new Date();
-    const endDate = new Date();
-    endDate.setMonth(startDate.getMonth() + durationMonths);
-
-    const subscription = await Subscription.create({
-      tenantId: invoice.tenantId,
-      tenantType: invoice.tenantType,
-      planId: plan._id,
-      tenure,
-      status: 'active',
-      startDate,
-      endDate,
-      capabilities: capsToObject(plan.capabilities), // snapshot limits at purchase
-      razorpaySubscriptionId: razorpaySubscriptionId || invoice.razorpaySubscriptionId,
-      history: [{ action: 'created', toPlanId: plan._id, note: 'Activated via Razorpay subscription', performedBy, date: new Date() }],
-    });
 
     invoice.status = 'PAID';
     invoice.paidAt = new Date();
     invoice.subscriptionId = subscription._id as mongoose.Types.ObjectId;
     if (paymentId) invoice.razorpayPaymentId = paymentId;
+    invoice.creditApplied = creditPaise;
+    
+    // Improve invoice series
+    if (!invoice.customInvoiceNumber || invoice.customInvoiceNumber.startsWith('INV-17')) {
+       const date = new Date();
+       const year = date.getFullYear();
+       const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+       invoice.customInvoiceNumber = `INV-${year}-${randomSuffix}`;
+    }
+    
     await invoice.save();
 
-    if (invoice.tenantType === 'SOCIETY') {
-      const { email, name } = await resolveTenantEmail(invoice.tenantId, invoice.tenantType);
-      if (email) EmailService.sendPaymentReceiptEmail(email, name, plan.name, invoice.amount, tenure);
+    const { email, name } = await resolveTenantEmail(invoice.tenantId, invoice.tenantType);
+    try {
+      invoice.customPdfUrl = await InvoiceService.generateCustomInvoice(invoice, subscription, plan, {
+        societyName: name || tenant.name, recipientEmail: email, tenure: invoice.tenure || 'monthly',
+        recordedByName: performedBy, creditApplied: creditPaise, currency: plan.currency,
+      });
+      await invoice.save();
+    } catch (e: any) {
+      logger.error(`PDF generation for online invoice ${invoice._id} failed: ${e.message}`);
     }
+
+    if (email) EmailService.sendPaymentReceiptEmail(email, name || tenant.name, plan.name, invoice.amount, invoice.tenure || 'monthly');
 
     return subscription;
   }
@@ -891,9 +950,13 @@ export class BillingController {
       razorpaySubscriptionId: rzpSubId,
     });
 
-    const base = localSub.endDate > new Date() ? new Date(localSub.endDate) : new Date();
-    base.setMonth(base.getMonth() + months);
-    localSub.endDate = base;
+    // If it was scheduled, the first charge pays for the already-added term, so we just activate it without extending.
+    if (localSub.status !== 'scheduled') {
+      const base = localSub.endDate > new Date() ? new Date(localSub.endDate) : new Date();
+      base.setMonth(base.getMonth() + months);
+      localSub.endDate = base;
+    }
+    
     localSub.status = 'active';
     localSub.history.push({ action: 'renewed', note: 'Auto-charged by Razorpay', performedBy: 'razorpay-webhook', date: new Date() } as any);
     await localSub.save();
@@ -901,6 +964,122 @@ export class BillingController {
     if (plan && localSub.tenantType === 'SOCIETY') {
       const { email, name } = await resolveTenantEmail(localSub.tenantId, localSub.tenantType);
       if (email) EmailService.sendPaymentReceiptEmail(email, name, plan.name, (pricing?.totalPrice || 0) * 100, localSub.tenure);
+    }
+  }
+
+  /**
+   * OWNER: Generates a Razorpay Payment Link to renew a tenant's current plan.
+   * Auto-detects the tenant's active plan and tenure — no manual plan selection needed.
+   * The payment link is emailed to the tenant and the URL is returned to the owner.
+   * When the tenant pays, the `payment_link.paid` webhook auto-activates the renewal
+   * through the existing `processPaidLinkInvoice` pipeline.
+   */
+  static async generateRenewalLink(req: Request, res: Response, next: NextFunction) {
+    try {
+      const parsed = generateRenewalLinkSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ success: false, message: parsed.error.errors[0].message });
+
+      const { societyId, shopId, tenantId, tenantType } = parsed.data;
+      const actualTenantId = tenantId || shopId || societyId;
+      const actualTenantType = tenantType || (shopId ? 'SHOP' : 'SOCIETY');
+
+      if (!actualTenantId) return res.status(400).json({ success: false, message: 'Tenant ID is required' });
+      if (!isRazorpayConfigured()) {
+        return res.status(503).json({ success: false, message: 'Online payments are not configured. Please set up Razorpay keys first.' });
+      }
+
+      // Resolve tenant
+      const tenant = actualTenantType === 'SHOP'
+        ? await Shop.findById(actualTenantId)
+        : await Society.findById(actualTenantId);
+      if (!tenant) return res.status(404).json({ success: false, message: 'Tenant not found' });
+
+      // Find the active paid subscription
+      const activeSub = await Subscription.findOne({
+        tenantId: new mongoose.Types.ObjectId(String(actualTenantId)),
+        tenantType: actualTenantType,
+        isFreeTier: { $ne: true },
+        status: { $in: ['active', 'past_due'] },
+      }).sort({ endDate: -1 }).populate('planId');
+
+      if (!activeSub || !activeSub.planId) {
+        return res.status(400).json({ success: false, message: 'No active paid subscription found for this tenant. Use "Upgrade / Assign Plan" instead.' });
+      }
+
+      const plan = await Plan.findById(activeSub.planId);
+      if (!plan) return res.status(404).json({ success: false, message: 'The subscription\'s plan no longer exists.' });
+
+      const tenure = activeSub.tenure || 'monthly';
+      const pricing = plan.getPricingForTenure(tenure);
+      if (!pricing) return res.status(400).json({ success: false, message: `Tenure "${tenure}" is no longer available for this plan.` });
+
+      const amountPaise = pricing.totalPrice * 100;
+      if (amountPaise <= 0) return res.status(400).json({ success: false, message: 'Renewal amount is zero — nothing to charge.' });
+
+      // Resolve recipient email
+      let recipientEmail = actualTenantType === 'SHOP' ? (tenant as any).adminEmail : (tenant as any).contactEmail;
+      if (!recipientEmail && tenant.adminUserId) {
+        const adminUser = await User.findById(tenant.adminUserId).select('email').lean();
+        recipientEmail = adminUser?.email;
+      }
+      if (!recipientEmail) {
+        return res.status(400).json({ success: false, message: 'This tenant has no contact email. Add one before generating a payment link.' });
+      }
+
+      const performedBy = req.user?.userName || 'Owner';
+
+      // Create a PENDING invoice
+      const invoice = await Invoice.create({
+        tenantId: new mongoose.Types.ObjectId(String(actualTenantId)),
+        tenantType: actualTenantType,
+        planId: plan._id,
+        tenure,
+        invoiceType: 'ONLINE_RAZORPAY',
+        amount: amountPaise,
+        status: 'PENDING',
+        recordedById: req.user?.userId,
+        recordedByName: performedBy,
+        customInvoiceNumber: `INV-${Date.now()}`,
+      });
+
+      // Create Razorpay Payment Link
+      const link = await RazorpayService.createPaymentLink({
+        amountPaise,
+        description: `${plan.name} (${tenure}) Renewal — ${tenant.name}`,
+        customer: {
+          name: (tenant as any).contactName || tenant.name,
+          email: recipientEmail,
+          contact: (tenant as any).contactPhone || (tenant as any).contactNumber,
+        },
+        notes: {
+          invoiceId: invoice._id.toString(),
+          societyId: String(actualTenantId),
+          tenantType: actualTenantType,
+        },
+      });
+
+      invoice.razorpayPaymentLinkId = link.id;
+      invoice.razorpayPaymentLinkUrl = (link as any).short_url;
+      await invoice.save();
+
+      // Email the link to the tenant
+      EmailService.sendPaymentLinkEmail(recipientEmail, tenant.name, plan.name, amountPaise, (link as any).short_url);
+
+      auditBilling(req, String(actualTenantId), 'SUBSCRIPTION_RENEWAL_LINK', invoice._id.toString(), {
+        tenantType: actualTenantType, plan: plan.name, tenure, amount: amountPaise,
+        sentTo: recipientEmail, link: (link as any).short_url, generatedBy: performedBy,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: `Renewal link sent to ${recipientEmail}. The plan will renew automatically once they pay.`,
+        paymentLinkUrl: (link as any).short_url,
+        invoiceId: invoice._id,
+        amount: amountPaise,
+      });
+    } catch (error: any) {
+      logger.error(`generateRenewalLink failed: ${error.message}`);
+      next(error);
     }
   }
 }

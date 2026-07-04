@@ -1,7 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IHistoryEntry {
-  action: 'created' | 'activated' | 'trial_started' | 'upgraded' | 'downgraded' | 'extended' | 'cancelled' | 'renewed' | 'suspended' | 'reactivated' | 'cash_plan_assigned' | 'expired';
+  action: 'created' | 'activated' | 'trial_started' | 'upgraded' | 'downgraded' | 'extended' | 'cancelled' | 'renewed' | 'suspended' | 'reactivated' | 'cash_plan_assigned' | 'expired' | 'cancelled_autopay';
   fromPlanId?: mongoose.Types.ObjectId;
   toPlanId?: mongoose.Types.ObjectId;
   note?: string;
@@ -34,7 +34,7 @@ const HistoryEntrySchema = new Schema<IHistoryEntry>({
     enum: [
       'created', 'activated', 'trial_started', 'upgraded',
       'downgraded', 'extended', 'cancelled', 'renewed',
-      'suspended', 'reactivated', 'cash_plan_assigned', 'expired'
+      'suspended', 'reactivated', 'cash_plan_assigned', 'expired', 'cancelled_autopay'
     ],
     required: true,
   },

@@ -381,11 +381,22 @@ export const getSocietyById = async (req: Request, res: Response, next: NextFunc
         .sort({ startDate: 1 }).populate('planId', 'name').lean(),
       getEffectiveLimits(society._id),
     ]);
+
+    let nextAmountPaise = 0;
+    if (governing && governing.planId && !governing.isFreeTier) {
+      const planDoc = governing.planId as any;
+      if (planDoc.getPricingForTenure) {
+        const pricing = planDoc.getPricingForTenure(governing.tenure);
+        if (pricing) nextAmountPaise = pricing.totalPrice * 100;
+      }
+    }
+
     res.status(200).json({
       society,
       subscription: governing,
       upcoming,
       planStatus: { planName: eff.planName, status: eff.status, isFreeTier: eff.isFreeTier, endDate: eff.endDate, graceEndsAt: eff.graceEndsAt },
+      nextAmountPaise,
     });
   } catch (error) {
     next(error);

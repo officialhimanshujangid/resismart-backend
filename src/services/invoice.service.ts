@@ -75,8 +75,9 @@ export class InvoiceService {
 
         const M = 50; // content margin
         const right = 545;
-        const credit = ctx.creditApplied || 0;
-        const planPrice = invoice.amount + credit;
+        const credit = Number(ctx.creditApplied) || 0;
+        const amount = Number(invoice.amount) || 0;
+        const planPrice = amount + credit;
 
         // ── Header band ───────────────────────────────────────────────
         doc.rect(0, 0, 595, 130).fill(BLUE);
@@ -110,8 +111,8 @@ export class InvoiceService {
         doc.text('AMOUNT', M, y + 9, { width: right - M - 14, align: 'right' });
 
         y += 26;
-        doc.font('Helvetica-Bold').fontSize(11).fillColor(DARK).text(`${plan.name} Subscription`, M + 14, y + 12, { width: 300 });
-        doc.font('Helvetica').fontSize(11).fillColor(DARK).text(ctx.tenure, 330, y + 12, { width: 90 });
+        doc.font('Helvetica-Bold').fontSize(11).fillColor(DARK).text(`${plan.name || 'Plan'} Subscription`, M + 14, y + 12, { width: 300 });
+        doc.font('Helvetica').fontSize(11).fillColor(DARK).text(String(ctx.tenure || 'Monthly'), 330, y + 12, { width: 90 });
         doc.text(money(planPrice), M, y + 12, { width: right - M - 14, align: 'right' });
         if (plan.description) doc.font('Helvetica').fontSize(8).fillColor(LIGHT).text(plan.description, M + 14, y + 30, { width: 300 });
         doc.moveTo(M, y + 50).lineTo(right, y + 50).strokeColor(LINE).stroke();
@@ -132,7 +133,7 @@ export class InvoiceService {
         ty += 12;
         doc.roundedRect(labelX, ty, right - labelX, 34, 8).fill(SOFT);
         doc.font('Helvetica-Bold').fontSize(13).fillColor(DARK).text('Total Paid', labelX + 12, ty + 10);
-        doc.fillColor(BLUE).text(money(invoice.amount), M, ty + 10, { width: right - M - 12, align: 'right' });
+        doc.fillColor(BLUE).text(money(amount), M, ty + 10, { width: right - M - 12, align: 'right' });
 
         // ── Payment details ───────────────────────────────────────────
         const pd = ty + 70;
