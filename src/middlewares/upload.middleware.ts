@@ -21,3 +21,23 @@ export const upload = multer({
     fileSize: 5 * 1024 * 1024, // 5MB limit
   },
 });
+
+// File filter to allow excel files
+const excelFileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  if (
+    file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    file.mimetype === 'application/vnd.ms-excel'
+  ) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only Excel files are allowed!') as any, false);
+  }
+};
+
+export const uploadExcel = multer({
+  storage,
+  fileFilter: excelFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+});

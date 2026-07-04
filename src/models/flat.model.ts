@@ -9,9 +9,21 @@ export enum FlatStatus {
 export interface IFlat extends Document {
   number: string;
   blockName: string; // "A Block", "Tower 2" - denormalized for speed
+  blockId: mongoose.Types.ObjectId;
   societyId: mongoose.Types.ObjectId;
   status: FlatStatus;
-  owners: mongoose.Types.ObjectId[]; // Users with UserRole.RESIDENT_OWNER
+  
+  plotNumber?: string;
+  fullAddress?: string;
+  registrationNumber?: string;
+  location?: {
+    type: 'Point';
+    coordinates: number[]; // [longitude, latitude]
+  };
+  
+  ownerUserId?: mongoose.Types.ObjectId; // User with UserRole.RESIDENT_OWNER (Head of flat)
+  owners: mongoose.Types.ObjectId[]; // Legacy/Backward compat
+  residents: mongoose.Types.ObjectId[]; // Refs to Resident model
   
   // Audit columns
   createdBy: mongoose.Types.ObjectId;
@@ -33,6 +45,11 @@ const FlatSchema = new Schema<IFlat>({
     required: true,
     trim: true,
   },
+  blockId: {
+    type: Schema.Types.ObjectId,
+    ref: 'Block',
+    required: true,
+  },
   societyId: {
     type: Schema.Types.ObjectId,
     ref: 'Society',
@@ -43,9 +60,29 @@ const FlatSchema = new Schema<IFlat>({
     enum: Object.values(FlatStatus),
     default: FlatStatus.VACANT,
   },
+  plotNumber: { type: String, trim: true },
+  fullAddress: { type: String, trim: true },
+  registrationNumber: { type: String, trim: true },
+  location: {
+    type: {
+      type: String,
+      enum: ['Point'],
+    },
+    coordinates: {
+      type: [Number], // [longitude, latitude]
+    }
+  },
+  ownerUserId: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  },
   owners: [{
     type: Schema.Types.ObjectId,
     ref: 'User',
+  }],
+  residents: [{
+    type: Schema.Types.ObjectId,
+    ref: 'Resident',
   }],
   createdBy: {
     type: Schema.Types.ObjectId,
@@ -71,8 +108,11 @@ const FlatSchema = new Schema<IFlat>({
 
 // Optimization Indexes
 FlatSchema.index({ societyId: 1 });
+FlatSchema.index({ blockId: 1 });
 FlatSchema.index({ societyId: 1, blockName: 1, number: 1 }, { unique: true }); // Prevent duplicate flat numbers in the same block
+FlatSchema.index({ ownerUserId: 1 });
 FlatSchema.index({ owners: 1 });
+FlatSchema.index({ location: '2dsphere' });
 
 export const Flat = mongoose.model<IFlat>('Flat', FlatSchema);
 export default Flat;

@@ -268,6 +268,30 @@ class EmailService {
     });
     this.sendEmail({ to: toEmail, subject: `Payment received — ${planName} active`, html });
   }
+
+  static sendFlatOwnerCreatedEmail(toEmail: string, ownerName: string, flatNumber: string, blockName: string, societyName: string, passwordStr: string): void {
+    const loginUrl = `${appConfig.frontendUrl}/login`;
+    const html = this.layout({
+      heading: `Welcome to ${societyName}!`,
+      body: this.p(`Hi ${ownerName}, your flat portal has been created. Your login credentials are below.`) +
+        this.infoBox([['Flat', flatNumber], ['Block', blockName], ['Society', societyName], ['Email', toEmail], ['Password', passwordStr]]) +
+        this.button('Log in', loginUrl) +
+        this.p(`<span style="color:#94a3b8;font-size:13px;">We strongly recommend changing your password after your first login.</span>`),
+    });
+    this.sendEmail({ to: toEmail, subject: `Your Flat Portal is ready — ${appConfig.appName}`, html });
+  }
+
+  static sendResidentCreatedEmail(toEmail: string, residentName: string, flatNumber: string, societyName: string, passwordStr: string): void {
+    const loginUrl = `${appConfig.frontendUrl}/login`;
+    const html = this.layout({
+      heading: `You've been added to a Flat`,
+      body: this.p(`Hi ${residentName}, you've been added as a resident of Flat <strong>${flatNumber}</strong> in <strong>${societyName}</strong>.`) +
+        this.infoBox([['Email', toEmail], ['Password', passwordStr]]) +
+        this.button('Log in', loginUrl) +
+        this.p(`<span style="color:#94a3b8;font-size:13px;">Please change your password immediately after logging in.</span>`),
+    });
+    this.sendEmail({ to: toEmail, subject: `You've been added as a resident — ${appConfig.appName}`, html });
+  }
 }
 
 export default EmailService;

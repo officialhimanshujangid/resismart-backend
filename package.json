@@ -26,6 +26,7 @@
     "nodemailer": "^6.9.13",
     "pdfkit": "^0.19.1",
     "razorpay": "^2.9.6",
+    "xlsx": "^0.18.5",
     "zod": "^3.23.4"
   },
   "devDependencies": {
