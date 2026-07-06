@@ -9,6 +9,7 @@ import {
   updateSociety,
   approveSociety,
   rejectSociety,
+  getMySociety,
 } from '../controllers/society.controller';
 import {
   getBlocks,
@@ -24,6 +25,7 @@ import {
   deleteFlat,
   downloadBulkUploadTemplate,
   bulkUploadFlats,
+  getFlatFormLookup,
 } from '../controllers/flat.controller';
 import {
   getResidentsByFlat,
@@ -52,12 +54,15 @@ router.get('/', authenticateJWT, authorizeRoles(OWNER), getSocieties);
 router.get('/stats', authenticateJWT, authorizeRoles(OWNER), getSocietyStats);
 
 // --- Block endpoints (within the active society tenant) ---
+router.get('/me', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), getMySociety);
+
 router.get('/blocks', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), getBlocks);
 router.post('/blocks', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), createBlock);
 router.put('/blocks/:blockId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), updateBlock);
 router.delete('/blocks/:blockId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), deleteBlock);
 
 // --- Flat endpoints (within the active society tenant) ---
+router.get('/flats/form-lookup', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), getFlatFormLookup);
 router.get('/flats/bulk-upload-template', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), downloadBulkUploadTemplate);
 router.post(
   '/flats/bulk-upload',

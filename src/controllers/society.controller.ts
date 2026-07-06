@@ -205,6 +205,24 @@ export const getSocietyById = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+export const getMySociety = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const tenantId = req.headers['x-tenant-id'];
+    if (!tenantId) {
+      res.status(400).json({ error: 'Tenant ID is required' });
+      return;
+    }
+    const society = await Society.findById(tenantId).populate('adminUserId', 'name email').lean();
+    if (!society) {
+      res.status(404).json({ error: 'Society not found' });
+      return;
+    }
+    res.status(200).json({ society });
+  } catch (error) {
+    next(error);
+  }
+};
+
 /**
  * Owner edits an existing society's details. Logs an audit entry with old/new values.
  */

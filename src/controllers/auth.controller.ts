@@ -5,8 +5,9 @@ import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '.
 import { registerSchema, loginSchema, selectContextSchema, forgotPasswordSchema, resetPasswordSchema } from '../validators/auth.validator';
 import crypto from 'crypto';
 import { AuditService } from '../services/audit.service';
-import { TenantType } from '../constants/roles';
+import { TenantType, UserRole } from '../constants/roles';
 import EmailService from '../services/email.service';
+import { Flat } from '../models/flat.model';
 
 export const register = async (
   req: Request,
@@ -84,8 +85,27 @@ export const login = async (
       res.status(401).json({ error: 'Invalid email or password' });
       return;
     }
-
-    const memberships = user.memberships;
+    let memberships = user.memberships || [];
+    
+    // Inject dynamic memberships from Flats
+    const userFlats = await Flat.find({
+      $or: [{ headOfFamily: user._id }, { familyMembers: user._id }]
+    }).lean();
+    
+    if (userFlats.length > 0) {
+      const dynamicMemberships = userFlats.map(f => ({
+        tenantType: TenantType.SOCIETY,
+        tenantId: f.societyId,
+        role: f.headOfFamily?.toString() === user._id.toString() ? UserRole.RESIDENT_OWNER : UserRole.FAMILY_MEMBER,
+      }));
+      
+      // Merge distinct
+      for (const dm of dynamicMemberships) {
+        if (!memberships.some(m => m.tenantId.toString() === dm.tenantId.toString() && m.role === dm.role)) {
+          memberships.push(dm);
+        }
+      }
+    }
 
     // CASE 1: No profiles registered
     if (!memberships || memberships.length === 0) {
@@ -273,24 +293,42 @@ export const refreshSessionToken = async (
     }
 
     let activeProfile;
+    let memberships = user.memberships || [];
+    
+    const userFlats = await Flat.find({
+      $or: [{ headOfFamily: user._id }, { familyMembers: user._id }]
+    }).lean();
+    
+    if (userFlats.length > 0) {
+      const dynamicMemberships = userFlats.map(f => ({
+        tenantType: TenantType.SOCIETY,
+        tenantId: f.societyId,
+        role: f.headOfFamily?.toString() === user._id.toString() ? UserRole.RESIDENT_OWNER : UserRole.FAMILY_MEMBER,
+      }));
+      for (const dm of dynamicMemberships) {
+        if (!memberships.some(m => m.tenantId.toString() === dm.tenantId.toString() && m.role === dm.role)) {
+          memberships.push(dm);
+        }
+      }
+    }
 
     if (tenantId && role) {
-      activeProfile = user.memberships.find(
+      activeProfile = memberships.find(
         (m) => m.tenantId.toString() === tenantId && m.role === role
       );
       if (!activeProfile) {
         res.status(403).json({ error: 'Unauthorized context request' });
         return;
       }
-    } else if (user.memberships && user.memberships.length === 1) {
-      activeProfile = user.memberships[0];
+    } else if (memberships && memberships.length === 1) {
+      activeProfile = memberships[0];
     }
 
-    if (!activeProfile && user.memberships && user.memberships.length > 1) {
+    if (!activeProfile && memberships && memberships.length > 1) {
       res.status(200).json({
         message: 'Multiple profiles found, context selection required',
         requiresContextSelection: true,
-        profiles: user.memberships.map((m) => ({
+        profiles: memberships.map((m) => ({
           tenantType: m.tenantType,
           tenantId: m.tenantId,
           role: m.role,

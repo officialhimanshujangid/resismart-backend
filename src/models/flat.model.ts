@@ -21,9 +21,14 @@ export interface IFlat extends Document {
     coordinates: number[]; // [longitude, latitude]
   };
   
+  size?: mongoose.Types.ObjectId; // Ref to FlatSize
+  
   ownerUserId?: mongoose.Types.ObjectId; // User with UserRole.RESIDENT_OWNER (Head of flat)
   owners: mongoose.Types.ObjectId[]; // Legacy/Backward compat
   residents: mongoose.Types.ObjectId[]; // Refs to Resident model
+  
+  headOfFamily?: mongoose.Types.ObjectId;
+  familyMembers: mongoose.Types.ObjectId[];
   
   // Audit columns
   createdBy: mongoose.Types.ObjectId;
@@ -60,7 +65,6 @@ const FlatSchema = new Schema<IFlat>({
     enum: Object.values(FlatStatus),
     default: FlatStatus.VACANT,
   },
-  plotNumber: { type: String, trim: true },
   fullAddress: { type: String, trim: true },
   registrationNumber: { type: String, trim: true },
   location: {
@@ -71,6 +75,10 @@ const FlatSchema = new Schema<IFlat>({
     coordinates: {
       type: [Number], // [longitude, latitude]
     }
+  },
+  size: {
+    type: Schema.Types.ObjectId,
+    ref: 'FlatSize',
   },
   ownerUserId: {
     type: Schema.Types.ObjectId,
@@ -83,6 +91,14 @@ const FlatSchema = new Schema<IFlat>({
   residents: [{
     type: Schema.Types.ObjectId,
     ref: 'Resident',
+  }],
+  headOfFamily: {
+    type: Schema.Types.ObjectId,
+    ref: 'User',
+  },
+  familyMembers: [{
+    type: Schema.Types.ObjectId,
+    ref: 'User',
   }],
   createdBy: {
     type: Schema.Types.ObjectId,

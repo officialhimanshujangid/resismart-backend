@@ -20,9 +20,11 @@ export const updateBlockSchema = z.object({
 export const createFlatSchema = z.object({
   blockId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Block ID'),
   number: z.string().min(1, 'Flat number is required'),
-  plotNumber: z.string().optional(),
   fullAddress: z.string().optional(),
   registrationNumber: z.string().optional(),
+  sizeId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Size ID').optional(),
+  headOfFamily: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID').optional(),
+  familyMembers: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID')).optional(),
   latitude: z.coerce.number().min(-90).max(90).optional(),
   longitude: z.coerce.number().min(-180).max(180).optional(),
   
@@ -36,9 +38,11 @@ export const updateFlatSchema = z.object({
   status: z.enum(['VACANT', 'OWNER_OCCUPIED', 'RENTED']).optional(),
   ownerUserId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Owner User ID').optional(),
   owners: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Owner User ID')).optional(), // legacy
-  plotNumber: z.string().optional(),
   fullAddress: z.string().optional(),
   registrationNumber: z.string().optional(),
+  sizeId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Size ID').optional(),
+  headOfFamily: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID').optional(),
+  familyMembers: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID')).optional(),
   latitude: z.coerce.number().min(-90).max(90).optional(),
   longitude: z.coerce.number().min(-180).max(180).optional(),
 });
@@ -58,7 +62,6 @@ export const updateResidentSchema = z.object({
 export const bulkUploadFlatRowSchema = z.object({
   blockName: z.string().min(1, 'Block name is required'),
   number: z.string().min(1, 'Flat number is required'),
-  plotNumber: z.string().optional(),
   fullAddress: z.string().optional(),
   registrationNumber: z.string().optional(),
   ownerName: z.string().optional(),

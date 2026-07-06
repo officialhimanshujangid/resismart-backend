@@ -16,9 +16,10 @@ import uploadRoutes from './routes/upload.routes';
 import planRoutes from './routes/plan.routes';
 import billingRoutes from './routes/billing.routes';
 import settingsRoutes from './routes/settings.routes';
-import dashboardRoutes from './routes/dashboard.routes';
 import webhookRoutes from './routes/webhook.routes';
 import userRoutes from './routes/user.routes';
+import flatSizeRoutes from './routes/flat-size.routes';
+import dashboardRoutes from './routes/dashboard.routes';
 import { errorHandler } from './middlewares/error.middleware';
 import { requestLogger } from './middlewares/logger.middleware';
 
@@ -95,6 +96,7 @@ app.use('/api/v1/billing', billingRoutes);
 app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/users', userRoutes);
+app.use('/api/v1/flat-sizes', flatSizeRoutes);
 
 // 10. JSON 404 for unknown routes
 app.use((req, res) => {
