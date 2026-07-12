@@ -7,13 +7,34 @@ export const registerSchema = z.object({
 });
 
 export const loginSchema = z.object({
-  email: z.string().email('Invalid email address'),
+  // identifier = email address OR phone number
+  identifier: z.string().min(3, 'Email or phone number is required'),
   password: z.string(),
 });
 
-export const selectContextSchema = z.object({
-  tenantId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid tenant MongoDB ObjectId'),
-  role: z.string(),
+const OTP_PURPOSES = ['SOCIETY_REGISTRATION', 'SHOP_REGISTRATION', 'FLAT_REGISTRATION', 'LOGIN', 'GENERIC'] as const;
+
+export const loginOtpRequestSchema = z.object({
+  identifier: z.string().min(3, 'Enter your email or phone number'),
+});
+
+export const loginOtpVerifySchema = z.object({
+  identifier: z.string().min(3, 'Enter your email or phone number'),
+  code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code'),
+});
+const OTP_CHANNELS = ['PHONE', 'EMAIL'] as const;
+
+export const otpRequestSchema = z.object({
+  channel: z.enum(OTP_CHANNELS),
+  target: z.string().min(3, 'A valid email or phone number is required'),
+  purpose: z.enum(OTP_PURPOSES).default('GENERIC'),
+});
+
+export const otpVerifySchema = z.object({
+  channel: z.enum(OTP_CHANNELS),
+  target: z.string().min(3, 'A valid email or phone number is required'),
+  purpose: z.enum(OTP_PURPOSES).default('GENERIC'),
+  code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code'),
 });
 
 export const forgotPasswordSchema = z.object({

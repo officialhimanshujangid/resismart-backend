@@ -14,6 +14,9 @@ import {
 import { AuditService } from '../services/audit.service';
 import EmailService from '../services/email.service';
 import { hashPassword } from '../utils/hash.util';
+import { normalizePhone } from '../utils/phone.util';
+import { assertVerified, consumeVerification } from '../services/otp.service';
+import { attachTenantMembership, primaryIdentityId } from '../services/identity.service';
 import { TenantType, UserRole } from '../constants/roles';
 
 const pickDetails = (d: any) => {
@@ -205,7 +208,21 @@ export const registerShopPublic = async (req: Request, res: Response, next: Next
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const { name, address, latitude, longitude, contactNumber, adminEmail, password } = parsed.data;
+    const { name, address, latitude, longitude, contactNumber, adminEmail, password, emailVerificationToken, phoneVerificationToken } = parsed.data;
+
+    // Shop admin = email + phone, both OTP-verified before creating.
+    const normPhone = normalizePhone(contactNumber);
+    const normEmail = adminEmail.toLowerCase();
+    if (!normPhone) {
+      res.status(400).json({ error: 'A valid contact number is required.' });
+      return;
+    }
+    const [emailOk, phoneOk] = await Promise.all([
+      assertVerified(emailVerificationToken || '', 'EMAIL', normEmail, 'SHOP_REGISTRATION'),
+      assertVerified(phoneVerificationToken || '', 'PHONE', normPhone, 'SHOP_REGISTRATION'),
+    ]);
+    if (!emailOk) { res.status(400).json({ error: 'Admin email not verified. Please verify the code sent to your email.' }); return; }
+    if (!phoneOk) { res.status(400).json({ error: 'Contact number not verified. Please verify the OTP.' }); return; }
 
     const existing = await Shop.findOne({ name: new RegExp(`^${name}$`, 'i') }).lean();
     if (existing) {
@@ -213,12 +230,12 @@ export const registerShopPublic = async (req: Request, res: Response, next: Next
       return;
     }
 
-    const placeholderUserId = new mongoose.Types.ObjectId(); 
+    const placeholderUserId = new mongoose.Types.ObjectId();
     const shop = await Shop.create({
       name,
       address,
       contactNumber,
-      adminEmail,
+      adminEmail: normEmail,
       status: 'PENDING',
       location:
         latitude !== undefined && longitude !== undefined
@@ -230,30 +247,27 @@ export const registerShopPublic = async (req: Request, res: Response, next: Next
       updatedBy: placeholderUserId,
       updatedByName: name,
     });
-    
-    // Attach plain password temporarily to memory (or handle in logic) so we can create it in approveShop if needed.
-    // Actually, in public registration, we might want to store the password hash securely or generate it.
-    // Let's assume the user enters the password but the shop schema doesn't store it, so we'd need to store the password hash temporarily or create the user now in INACTIVE state.
-    // For simplicity following the existing society flow, we'll provision the user but keep them inactive until approval, OR we can generate a random password like Society does.
-    // But the requirements said "take admin email password". So the user provides it!
-    // We will create the user NOW as INACTIVE.
-    
-    let user = await User.findOne({ email: adminEmail.toLowerCase() });
-    if (!user) {
-      user = await User.create({
-        name: name,
-        email: adminEmail.toLowerCase(),
-        passwordHash: await hashPassword(password),
-        isActive: false, // Inactive until shop is approved
-        memberships: [{ tenantType: TenantType.SHOP, tenantId: shop._id, role: UserRole.SHOP_ADMIN }],
-      });
-    } else {
-      user.memberships.push({ tenantType: TenantType.SHOP, tenantId: shop._id, role: UserRole.SHOP_ADMIN } as any);
-      await user.save();
-    }
-    
-    shop.adminUserId = user._id;
+
+    // Identifier-scoped, passwordless: SHOP_ADMIN on both the email and phone
+    // identities (inactive until approval). Login is via OTP — the password field
+    // is no longer used as a credential.
+    const identities = await attachTenantMembership({
+      email: normEmail,
+      phone: normPhone,
+      name,
+      tenantType: TenantType.SHOP,
+      tenantId: shop._id,
+      role: UserRole.SHOP_ADMIN,
+      isActive: false,
+    });
+    shop.adminUserId = primaryIdentityId(identities);
     await shop.save();
+
+    // One-time use: burn the verifications.
+    await Promise.all([
+      consumeVerification('EMAIL', normEmail, 'SHOP_REGISTRATION'),
+      consumeVerification('PHONE', normPhone, 'SHOP_REGISTRATION'),
+    ]);
 
     if ((EmailService as any).sendShopPendingEmail) {
       (EmailService as any).sendShopPendingEmail(adminEmail, name);
@@ -405,38 +419,22 @@ export const rejectShop = async (req: Request, res: Response, next: NextFunction
   }
 };
 
-async function provisionShopAdmin(shop: any, email: string, name: string, password?: string): Promise<void> {
-  let user = await User.findOne({ email: email.toLowerCase() });
-  const tempPassword = password || crypto.randomBytes(6).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10) + 'A1';
+async function provisionShopAdmin(shop: any, email: string, name: string, _password?: string): Promise<void> {
+  // Identifier-scoped, passwordless: activate SHOP_ADMIN on both the email and
+  // phone identities so either can log in (via OTP) and see this shop.
+  const result = await attachTenantMembership({
+    email,
+    phone: shop.contactNumber,
+    name,
+    tenantType: TenantType.SHOP,
+    tenantId: shop._id,
+    role: UserRole.SHOP_ADMIN,
+    isActive: true,
+  });
 
-  if (!user) {
-    user = await User.create({
-      name,
-      email: email.toLowerCase(),
-      passwordHash: await hashPassword(tempPassword),
-      isActive: true,
-      memberships: [{ tenantType: TenantType.SHOP, tenantId: shop._id, role: UserRole.SHOP_ADMIN }],
-    });
-    if (!password) {
-      if ((EmailService as any).sendShopApprovedEmail) {
-        (EmailService as any).sendShopApprovedEmail(email, shop.name, tempPassword);
-      } else {
-        EmailService.sendSocietyApprovedEmail(email, shop.name, tempPassword);
-      }
-    }
-  } else {
-    user.isActive = true;
-    const already = user.memberships.some(
-      (m: any) => m.tenantId.toString() === shop._id.toString() && m.role === UserRole.SHOP_ADMIN
-    );
-    if (!already) {
-      user.memberships.push({ tenantType: TenantType.SHOP, tenantId: shop._id, role: UserRole.SHOP_ADMIN } as any);
-    }
-    await user.save();
-  }
-
-  shop.adminUserId = user._id;
+  shop.adminUserId = primaryIdentityId(result);
   await shop.save();
+  if (email) EmailService.sendTenantAccessEmail(email, shop.name, 'shop');
 }
 
 export const getMyShop = async (req: Request, res: Response, next: NextFunction): Promise<void> => {

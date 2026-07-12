@@ -70,3 +70,6 @@ export const enforceTenantAccess = (req: Request, res: Response, next: NextFunct
   }
   next();
 };
+
+/** The active flat/shop id for the current session, or undefined for tenant-level sessions. */
+export const getActiveUnitId = (req: Request): string | undefined => req.user?.activeUnitId;

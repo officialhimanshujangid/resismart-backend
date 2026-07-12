@@ -13,7 +13,8 @@ const shopDetailFields = {
   longitude: z.coerce.number().min(-180).max(180).optional(),
 };
 
-// Self-registration from the public landing page (shop created in PENDING state)
+// Self-registration from the public landing page (shop created in PENDING state).
+// Shop admin = email + phone, both OTP-verified (like a flat owner).
 export const registerShopPublicSchema = z.object({
   name: z.string().min(2, 'Shop name must be at least 2 characters long'),
   contactNumber: z.string().min(7).max(20),
@@ -21,11 +22,15 @@ export const registerShopPublicSchema = z.object({
   adminEmail: z.string().email('A valid admin email is required'),
   password: z.string().min(6, 'Password must be at least 6 characters long'),
   ...shopDetailFields,
+  emailVerificationToken: z.string().min(10, 'Please verify the admin email via OTP'),
+  phoneVerificationToken: z.string().min(10, 'Please verify the contact number via OTP'),
 });
 
-// Owner-side registration (auto-approved / ACTIVE)
+// Owner-side registration (auto-approved / ACTIVE). Trusted owner — OTP tokens optional.
 export const registerShopAdminSchema = registerShopPublicSchema.extend({
   password: z.string().min(6).optional(),
+  emailVerificationToken: z.string().optional(),
+  phoneVerificationToken: z.string().optional(),
 });
 
 // Owner edits an existing shop

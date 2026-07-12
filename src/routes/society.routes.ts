@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import {
-  createSociety,
   getSocieties,
   getSocietyStats,
   getSocietyById,
@@ -48,7 +47,6 @@ const OWNER = [UserRole.SYSTEM_OWNER, UserRole.SYSTEM_EMPLOYEE];
 router.post('/register-public', registerSocietyPublic);
 
 // --- Owner society management ---
-router.post('/', authenticateJWT, authorizeRoles(OWNER), createSociety);
 router.post('/register-admin', authenticateJWT, authorizeRoles(OWNER), registerSocietyAdmin);
 router.get('/', authenticateJWT, authorizeRoles(OWNER), getSocieties);
 router.get('/stats', authenticateJWT, authorizeRoles(OWNER), getSocietyStats);

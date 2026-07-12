@@ -46,6 +46,14 @@ export const appConfig = {
   awsSecretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
   awsRegion: process.env.AWS_REGION || 'eu-north-1',
   awsS3Bucket: process.env.AWS_S3_BUCKET || 'amzn-himanshu-resismart',
+  // OTP: no SMS gateway yet — in dev mode the PHONE code is returned in the API
+  // response so the user can read it on screen. Defaults to on in dev, OFF in
+  // production (never leak codes) unless OTP_DEV_MODE is explicitly set.
+  otpDevMode: process.env.OTP_DEV_MODE ? process.env.OTP_DEV_MODE === 'true' : !isProduction,
+  otpTtlSeconds: parseInt(process.env.OTP_TTL_SECONDS || '600', 10),        // code validity: 10 minutes
+  otpVerifyTokenTtlSeconds: parseInt(process.env.OTP_VERIFY_TTL_SECONDS || '900', 10), // verified window: 15 minutes
+  otpResendCooldownSeconds: parseInt(process.env.OTP_RESEND_COOLDOWN || '60', 10),      // min gap between sends
+  otpDailyCap: parseInt(process.env.OTP_DAILY_CAP || '5', 10),               // max sends per target/24h
   // Razorpay (live integration)
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
@@ -66,6 +74,10 @@ export const assertConfig = (): void => {
     throw new Error(
       `Refusing to start: required environment variables are missing in production: ${missing.join(', ')}`
     );
+  }
+  if (isProduction && appConfig.otpDevMode) {
+    // eslint-disable-next-line no-console
+    console.warn('[config] OTP_DEV_MODE is ON in production — OTP codes will be exposed in API responses. Set OTP_DEV_MODE=false.');
   }
 };
 

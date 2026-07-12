@@ -89,7 +89,7 @@ const runVerification = async () => {
     await alice.save();
 
     // Verify multiple profile login logic
-    const isPassMatched = await comparePassword(alicePassword, alice.passwordHash);
+    const isPassMatched = await comparePassword(alicePassword, alice.passwordHash || '');
     console.log(`Password matches: ${isPassMatched}`);
 
     if (alice.memberships.length > 1) {

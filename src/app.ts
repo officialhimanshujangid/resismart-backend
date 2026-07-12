@@ -20,6 +20,7 @@ import webhookRoutes from './routes/webhook.routes';
 import userRoutes from './routes/user.routes';
 import flatSizeRoutes from './routes/flat-size.routes';
 import dashboardRoutes from './routes/dashboard.routes';
+import meRoutes from './routes/me.routes';
 import { errorHandler } from './middlewares/error.middleware';
 import { requestLogger } from './middlewares/logger.middleware';
 
@@ -62,6 +63,16 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many authentication attempts. Please try again after 15 minutes.' },
+  // OTP has its own limiter — don't let OTP traffic burn the login budget.
+  skip: (req) => req.path.startsWith('/otp'),
+});
+// Dedicated limiter for OTP request/verify (in addition to per-target cooldown/cap in the service).
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many verification attempts from this device. Please try again later.' },
 });
 
 // 5. Razorpay webhook — MUST receive the raw body for signature verification,
@@ -72,7 +83,8 @@ app.use('/api/v1/webhooks', express.raw({ type: '*/*' }), webhookRoutes);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// 7. Apply rate limiters
+// 7. Apply rate limiters (otp limiter first so it owns /auth/otp)
+app.use('/api/v1/auth/otp', otpLimiter);
 app.use('/api/v1/auth', authLimiter);
 app.use('/api', generalLimiter);
 
@@ -97,6 +109,7 @@ app.use('/api/v1/settings', settingsRoutes);
 app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/flat-sizes', flatSizeRoutes);
+app.use('/api/v1/me', meRoutes);
 
 // 10. JSON 404 for unknown routes
 app.use((req, res) => {

@@ -2,12 +2,14 @@ import { Request, Response, NextFunction } from 'express';
 import { User } from '../models/user.model';
 import { hashPassword, comparePassword } from '../utils/hash.util';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.util';
-import { registerSchema, loginSchema, selectContextSchema, forgotPasswordSchema, resetPasswordSchema } from '../validators/auth.validator';
+import { registerSchema, loginSchema, loginOtpRequestSchema, loginOtpVerifySchema, forgotPasswordSchema, resetPasswordSchema } from '../validators/auth.validator';
 import crypto from 'crypto';
 import { AuditService } from '../services/audit.service';
-import { TenantType, UserRole } from '../constants/roles';
+import { TenantType } from '../constants/roles';
 import EmailService from '../services/email.service';
-import { Flat } from '../models/flat.model';
+import { isEmail, normalizePhone } from '../utils/phone.util';
+import { resolveUserContexts, toTokenPayload } from '../services/context.service';
+import { requestOtp, verifyOtp, consumeVerification, OtpRateError, OtpInputError } from '../services/otp.service';
 
 export const register = async (
   req: Request,
@@ -50,7 +52,7 @@ export const register = async (
     });
 
     // Send Welcome Email
-    EmailService.sendWelcomeEmail(newUser.email, newUser.name);
+    if (newUser.email) EmailService.sendWelcomeEmail(newUser.email, newUser.name);
 
     res.status(201).json({
       message: 'User registered successfully. Admin must assign your role profiles.',
@@ -72,194 +74,74 @@ export const login = async (
 ): Promise<void> => {
   try {
     const validatedData = loginSchema.parse(req.body);
+    const identifier = validatedData.identifier.trim();
 
-    // Get user with passwordHash. Optimizing response times with lean query structure
-    const user = await User.findOne({ email: validatedData.email }).exec();
+    // Look up by email OR normalized phone number.
+    const query = isEmail(identifier)
+      ? { email: identifier.toLowerCase() }
+      : { phone: normalizePhone(identifier) };
+
+    const user = await User.findOne(query).exec();
     if (!user || !user.isActive) {
-      res.status(401).json({ error: 'Invalid email or password' });
+      res.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
+
+    // Passwordless tenant identities have no passwordHash — they must use OTP login.
+    if (!user.passwordHash) {
+      res.status(401).json({ error: 'This account signs in with a one-time code.', useOtp: true });
       return;
     }
 
     const isMatch = await comparePassword(validatedData.password, user.passwordHash);
     if (!isMatch) {
-      res.status(401).json({ error: 'Invalid email or password' });
+      res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
-    let memberships = user.memberships || [];
-    
-    // Inject dynamic memberships from Flats
-    const userFlats = await Flat.find({
-      $or: [{ headOfFamily: user._id }, { familyMembers: user._id }]
-    }).lean();
-    
-    if (userFlats.length > 0) {
-      const dynamicMemberships = userFlats.map(f => ({
-        tenantType: TenantType.SOCIETY,
-        tenantId: f.societyId,
-        role: f.headOfFamily?.toString() === user._id.toString() ? UserRole.RESIDENT_OWNER : UserRole.FAMILY_MEMBER,
-      }));
-      
-      // Merge distinct
-      for (const dm of dynamicMemberships) {
-        if (!memberships.some(m => m.tenantId.toString() === dm.tenantId.toString() && m.role === dm.role)) {
-          memberships.push(dm);
-        }
-      }
-    }
 
-    // CASE 1: No profiles registered
-    if (!memberships || memberships.length === 0) {
+    // Resolve every switchable unit (flats/plots/shops + admin roles).
+    const contexts = await resolveUserContexts(user);
+
+    if (contexts.length === 0) {
       res.status(403).json({
         error: 'Your account does not have any active society or shop profiles. Please contact your administrator.',
       });
       return;
     }
 
-    // CASE 2: Exactly 1 profile registered -> Auto-Select Context
-    if (memberships.length === 1) {
-      const activeProfile = memberships[0];
-      const tokenPayload = {
-        userId: user._id.toString(),
-        activeTenantId: activeProfile.tenantId.toString(),
-        activeTenantType: activeProfile.tenantType,
-        activeRole: activeProfile.role,
-      };
-
-      const accessToken = generateAccessToken(tokenPayload);
-      const refreshToken = generateRefreshToken(user._id.toString());
-
-      // Audit Log logoff context
-      AuditService.log({
-        userId: user._id.toString(),
-        userName: user.name,
-        tenantId: activeProfile.tenantId,
-        tenantType: activeProfile.tenantType,
-        action: 'USER_LOGIN_AUTO_SELECT',
-        resource: 'User',
-        resourceId: user._id.toString(),
-        ipAddress: req.ip || 'unknown',
-        userAgent: req.headers['user-agent'] || 'unknown',
-      });
-
-      // Send Login Security Alert Email
-      EmailService.sendLoginNotification(
-        user.email,
-        user.name,
-        activeProfile.tenantType === TenantType.SOCIETY ? 'Society Context' : 'Shop Context',
-        activeProfile.role
-      );
-
-      res.status(200).json({
-        message: 'Login successful (context auto-selected)',
-        autoSelected: true,
-        token: accessToken,
-        refreshToken: refreshToken,
-        profile: {
-          tenantType: activeProfile.tenantType,
-          tenantId: activeProfile.tenantId,
-          role: activeProfile.role,
-        },
-        user: {
-          name: user.name,
-          email: user.email,
-        },
-      });
-      return;
-    }
-
-    // CASE 3: Multiple profiles -> Request context selection
-    res.status(200).json({
-      message: 'Multiple profiles found, please select context',
-      autoSelected: false,
-      requiresContextSelection: true,
-      profiles: memberships.map((m) => ({
-        tenantType: m.tenantType,
-        tenantId: m.tenantId,
-        role: m.role,
-      })),
-      userId: user._id,
-    });
-  } catch (error: any) {
-    if (error.name === 'ZodError') {
-      res.status(400).json({ errors: error.errors });
-      return;
-    }
-    next(error);
-  }
-};
-
-export const selectContext = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const validatedData = selectContextSchema.parse(req.body);
-    const authHeader = req.headers.authorization;
-    
-    // We expect the user to send their credentials/temporary identity token to perform switch context
-    // For simplicity of this demonstration, we allow passing context selection requests by finding user via body `userId`
-    const userId = req.body.userId;
-    if (!userId) {
-      res.status(400).json({ error: 'userId is required for context selection' });
-      return;
-    }
-
-    const user = await User.findById(userId).exec();
-    if (!user || !user.isActive) {
-      res.status(401).json({ error: 'User does not exist or is inactive' });
-      return;
-    }
-
-    // Validate that the user actually belongs to the chosen tenant context
-    const matchingMembership = user.memberships.find(
-      (m) => m.tenantId.toString() === validatedData.tenantId && m.role === validatedData.role
-    );
-
-    if (!matchingMembership) {
-      res.status(403).json({ error: 'Unauthorized context selection request' });
-      return;
-    }
-
-    const tokenPayload = {
-      userId: user._id.toString(),
-      activeTenantId: matchingMembership.tenantId.toString(),
-      activeTenantType: matchingMembership.tenantType,
-      activeRole: matchingMembership.role,
-    };
-
-    const accessToken = generateAccessToken(tokenPayload);
+    // Auto-select the first (default) context; the rest populate the switcher.
+    const active = contexts[0];
+    const accessToken = generateAccessToken(toTokenPayload(user, active));
     const refreshToken = generateRefreshToken(user._id.toString());
 
-    // Write audit log
     AuditService.log({
       userId: user._id.toString(),
       userName: user.name,
-      tenantId: matchingMembership.tenantId,
-      tenantType: matchingMembership.tenantType,
-      action: 'USER_CONTEXT_SELECT',
+      tenantId: active.tenantId,
+      tenantType: active.tenantType,
+      action: 'USER_LOGIN_AUTO_SELECT',
       resource: 'User',
       resourceId: user._id.toString(),
       ipAddress: req.ip || 'unknown',
       userAgent: req.headers['user-agent'] || 'unknown',
     });
 
-    // Send Login Security Alert Email
-    EmailService.sendLoginNotification(
-      user.email,
-      user.name,
-      matchingMembership.tenantType === TenantType.SOCIETY ? 'Society Context' : 'Shop Context',
-      matchingMembership.role
-    );
+    if (user.email) EmailService.sendLoginNotification(user.email, user.name, active.tenantName, active.role);
 
     res.status(200).json({
-      message: 'Context context selected successfully',
+      message: 'Login successful',
+      autoSelected: true,
       token: accessToken,
-      refreshToken: refreshToken,
-      profile: {
-        tenantType: matchingMembership.tenantType,
-        tenantId: matchingMembership.tenantId,
-        role: matchingMembership.role,
+      refreshToken,
+      activeContext: active,
+      availableContexts: contexts,
+      // Legacy shape kept for older clients.
+      profile: { tenantType: active.tenantType, tenantId: active.tenantId, role: active.role },
+      user: {
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        profileImage: user.profileImage,
       },
     });
   } catch (error: any) {
@@ -271,13 +153,112 @@ export const selectContext = async (
   }
 };
 
+/**
+ * POST /auth/login/otp/request — passwordless login for tenant identities.
+ * Sends a LOGIN code only if an active identity with tenant access exists
+ * (generic response otherwise, to avoid account enumeration).
+ */
+export const loginOtpRequest = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { identifier } = loginOtpRequestSchema.parse(req.body);
+    const id = identifier.trim();
+    const channel: 'EMAIL' | 'PHONE' = isEmail(id) ? 'EMAIL' : 'PHONE';
+    const target = channel === 'EMAIL' ? id.toLowerCase() : normalizePhone(id);
+
+    const user = await User.findOne(channel === 'EMAIL' ? { email: target } : { phone: target }).exec();
+
+    let devCode: string | undefined;
+    if (user && user.isActive) {
+      const contexts = await resolveUserContexts(user);
+      if (contexts.length > 0) {
+        try {
+          const result = await requestOtp(channel, id, 'LOGIN');
+          devCode = result.devCode;
+        } catch (e) {
+          if (e instanceof OtpRateError) { res.status(429).json({ error: e.message }); return; }
+          if (e instanceof OtpInputError) { res.status(400).json({ error: e.message }); return; }
+          throw e;
+        }
+      }
+    }
+
+    res.status(200).json({
+      message: channel === 'EMAIL'
+        ? 'If an account exists, a login code has been emailed.'
+        : 'If an account exists, a login code has been sent.',
+      channel,
+      ...(devCode ? { devCode } : {}), // dev only (phone) — shown on the UI
+    });
+  } catch (error: any) {
+    if (error.name === 'ZodError') { res.status(400).json({ errors: error.errors }); return; }
+    next(error);
+  }
+};
+
+/**
+ * POST /auth/login/otp/verify — verify the LOGIN code, resolve the identity's
+ * contexts, and issue a session (auto-selecting the first).
+ */
+export const loginOtpVerify = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { identifier, code } = loginOtpVerifySchema.parse(req.body);
+    const id = identifier.trim();
+    const channel: 'EMAIL' | 'PHONE' = isEmail(id) ? 'EMAIL' : 'PHONE';
+    const target = channel === 'EMAIL' ? id.toLowerCase() : normalizePhone(id);
+
+    const result = await verifyOtp(channel, id, 'LOGIN', code);
+    if (!result.ok) { res.status(400).json({ error: result.error }); return; }
+
+    const user = await User.findOne(channel === 'EMAIL' ? { email: target } : { phone: target }).exec();
+    if (!user || !user.isActive) { res.status(403).json({ error: 'No account found for this contact.' }); return; }
+
+    const contexts = await resolveUserContexts(user);
+    if (contexts.length === 0) {
+      res.status(403).json({ error: 'Your account does not have any active society or shop access yet.' });
+      return;
+    }
+
+    await consumeVerification(channel, id, 'LOGIN'); // one-time
+
+    const active = contexts[0];
+    const accessToken = generateAccessToken(toTokenPayload(user, active));
+    const refreshToken = generateRefreshToken(user._id.toString());
+
+    AuditService.log({
+      userId: user._id.toString(),
+      userName: user.name,
+      tenantId: active.tenantId,
+      tenantType: active.tenantType,
+      action: 'USER_LOGIN_OTP',
+      resource: 'User',
+      resourceId: user._id.toString(),
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.headers['user-agent'] || 'unknown',
+    });
+    if (user.email) EmailService.sendLoginNotification(user.email, user.name, active.tenantName, active.role);
+
+    res.status(200).json({
+      message: 'Login successful',
+      token: accessToken,
+      refreshToken,
+      activeContext: active,
+      availableContexts: contexts,
+      profile: { tenantType: active.tenantType, tenantId: active.tenantId, role: active.role },
+      user: { name: user.name, email: user.email, phone: user.phone, profileImage: user.profileImage },
+    });
+  } catch (error: any) {
+    if (error.name === 'ZodError') { res.status(400).json({ errors: error.errors }); return; }
+    next(error);
+  }
+};
+
 export const refreshSessionToken = async (
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { refreshToken, tenantId, role } = req.body;
+    const { refreshToken, tenantId, role, contextId } = req.body;
     if (!refreshToken) {
       res.status(400).json({ error: 'Refresh token is required' });
       return;
@@ -292,75 +273,41 @@ export const refreshSessionToken = async (
       return;
     }
 
-    let activeProfile;
-    let memberships = user.memberships || [];
-    
-    const userFlats = await Flat.find({
-      $or: [{ headOfFamily: user._id }, { familyMembers: user._id }]
-    }).lean();
-    
-    if (userFlats.length > 0) {
-      const dynamicMemberships = userFlats.map(f => ({
-        tenantType: TenantType.SOCIETY,
-        tenantId: f.societyId,
-        role: f.headOfFamily?.toString() === user._id.toString() ? UserRole.RESIDENT_OWNER : UserRole.FAMILY_MEMBER,
-      }));
-      for (const dm of dynamicMemberships) {
-        if (!memberships.some(m => m.tenantId.toString() === dm.tenantId.toString() && m.role === dm.role)) {
-          memberships.push(dm);
-        }
-      }
-    }
+    const contexts = await resolveUserContexts(user);
 
-    if (tenantId && role) {
-      activeProfile = memberships.find(
-        (m) => m.tenantId.toString() === tenantId && m.role === role
-      );
-      if (!activeProfile) {
-        res.status(403).json({ error: 'Unauthorized context request' });
-        return;
-      }
-    } else if (memberships && memberships.length === 1) {
-      activeProfile = memberships[0];
-    }
-
-    if (!activeProfile && memberships && memberships.length > 1) {
-      res.status(200).json({
-        message: 'Multiple profiles found, context selection required',
-        requiresContextSelection: true,
-        profiles: memberships.map((m) => ({
-          tenantType: m.tenantType,
-          tenantId: m.tenantId,
-          role: m.role,
-        })),
-        userId: user._id,
-      });
-      return;
-    }
-
-    if (!activeProfile) {
+    if (contexts.length === 0) {
       res.status(403).json({ error: 'Your account does not have any active society or shop profiles.' });
       return;
     }
 
-    const tokenPayload = {
-      userId: user._id.toString(),
-      activeTenantId: activeProfile.tenantId.toString(),
-      activeTenantType: activeProfile.tenantType,
-      activeRole: activeProfile.role,
-    };
+    // Resolve the requested context: explicit contextId, legacy tenantId+role, else default first.
+    let active;
+    if (contextId) {
+      active = contexts.find((c) => c.contextId === contextId);
+      if (!active) {
+        res.status(403).json({ error: 'Unauthorized context request' });
+        return;
+      }
+    } else if (tenantId && role) {
+      const matches = contexts.filter((c) => c.tenantId === tenantId && c.role === role);
+      active = matches.find((c) => c.unitId) || matches[0];
+      if (!active) {
+        res.status(403).json({ error: 'Unauthorized context request' });
+        return;
+      }
+    } else {
+      active = contexts[0];
+    }
 
-    const newAccessToken = generateAccessToken(tokenPayload);
+    const newAccessToken = generateAccessToken(toTokenPayload(user, active));
     const newRefreshToken = generateRefreshToken(user._id.toString());
 
     res.status(200).json({
       token: newAccessToken,
       refreshToken: newRefreshToken,
-      profile: {
-        tenantType: activeProfile.tenantType,
-        tenantId: activeProfile.tenantId,
-        role: activeProfile.role,
-      },
+      activeContext: active,
+      availableContexts: contexts,
+      profile: { tenantType: active.tenantType, tenantId: active.tenantId, role: active.role },
     });
   } catch (error) {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
@@ -392,7 +339,7 @@ export const forgotPassword = async (
     await user.save();
 
     // Send email with the plaintext token
-    EmailService.sendPasswordResetEmail(user.email, resetToken);
+    if (user.email) EmailService.sendPasswordResetEmail(user.email, resetToken);
 
     res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
   } catch (error: any) {

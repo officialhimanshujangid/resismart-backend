@@ -1,10 +1,5 @@
 import { z } from 'zod';
 
-export const createSocietySchema = z.object({
-  name: z.string().min(3, 'Society name must be at least 3 characters long'),
-  address: z.string().min(5, 'Address must be at least 5 characters long'),
-});
-
 export const createBlockSchema = z.object({
   name: z.string().min(1, 'Block name is required'),
   totalFloors: z.coerce.number().min(0).optional(),
@@ -17,6 +12,11 @@ export const updateBlockSchema = z.object({
   blockType: z.string().optional(),
 });
 
+// When any owner field is filled, the owner is being provisioned — then name,
+// email, an OTP-verified phone, and the verification token are all required.
+const hasOwnerInfo = (d: { ownerName?: string; ownerEmail?: string; ownerPhone?: string }) =>
+  !!(d.ownerName?.trim() || d.ownerEmail?.trim() || d.ownerPhone?.trim());
+
 export const createFlatSchema = z.object({
   blockId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Block ID'),
   number: z.string().min(1, 'Flat number is required'),
@@ -27,11 +27,21 @@ export const createFlatSchema = z.object({
   familyMembers: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID')).optional(),
   latitude: z.coerce.number().min(-90).max(90).optional(),
   longitude: z.coerce.number().min(-180).max(180).optional(),
-  
-  // Optional owner info
+
+  // Optional owner info — a flat may be created vacant. If present, it must be complete,
+  // with BOTH the owner email and phone OTP-verified.
   ownerName: z.string().optional(),
   ownerEmail: z.string().email('Valid owner email is required if providing owner info').optional(),
   ownerPhone: z.string().optional(),
+  ownerEmailVerificationToken: z.string().optional(),
+  ownerPhoneVerificationToken: z.string().optional(),
+}).superRefine((d, ctx) => {
+  if (!hasOwnerInfo(d)) return; // vacant flat — nothing to enforce
+  if (!d.ownerName?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerName'], message: 'Owner name is required' });
+  if (!d.ownerEmail?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerEmail'], message: 'Owner email is required' });
+  if (!d.ownerPhone || d.ownerPhone.trim().length < 8) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerPhone'], message: 'A valid owner phone number is required' });
+  if (!d.ownerEmailVerificationToken) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerEmailVerificationToken'], message: 'Please verify the owner email via OTP' });
+  if (!d.ownerPhoneVerificationToken) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerPhoneVerificationToken'], message: 'Please verify the owner phone number via OTP' });
 });
 
 export const updateFlatSchema = z.object({
@@ -69,6 +79,13 @@ export const bulkUploadFlatRowSchema = z.object({
   ownerPhone: z.string().optional(),
   latitude: z.coerce.number().min(-90).max(90).optional(),
   longitude: z.coerce.number().min(-180).max(180).optional(),
+}).superRefine((d, ctx) => {
+  // Bulk rows can't do interactive OTP, but a provided owner must still be complete
+  // with a phone number (so the account can later log in / verify by phone).
+  if (!hasOwnerInfo(d)) return;
+  if (!d.ownerName?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerName'], message: 'Owner Name is required when an owner is provided' });
+  if (!d.ownerEmail?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerEmail'], message: 'Owner Email is required when an owner is provided' });
+  if (!d.ownerPhone || d.ownerPhone.trim().length < 8) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ownerPhone'], message: 'Owner Phone is required when an owner is provided' });
 });
 
 // Extended optional detail fields shared across registration & updates
@@ -85,19 +102,28 @@ const societyDetailFields = {
   longitude: z.coerce.number().min(-180).max(180).optional(),
 };
 
-// Self-registration from the public landing page (society created in PENDING state)
+// Self-registration from the public landing page (society created in PENDING state).
+// Email is the login identity and phone is the org contact — BOTH must be OTP-verified.
 export const registerSocietyPublicSchema = z.object({
   name: z.string().min(3, 'Society name must be at least 3 characters long'),
   address: z.string().min(5, 'Address must be at least 5 characters long'),
   contactName: z.string().min(2, 'Contact name is required'),
   contactEmail: z.string().email('A valid contact email is required'),
   ...societyDetailFields,
+  contactPhone: z.string().min(8, 'A valid phone number is required'),
+  emailVerificationToken: z.string().min(10, 'Please verify your email via OTP'),
+  phoneVerificationToken: z.string().min(10, 'Please verify your phone number via OTP'),
 });
 
-// Owner-side registration (auto-approved / ACTIVE)
 export const registerSocietyAdminSchema = registerSocietyPublicSchema.extend({
   contactName: z.string().min(2).optional(),
   contactEmail: z.string().email().optional(),
+  emailVerificationToken: z.string().optional(),
+  phoneVerificationToken: z.string().optional(),
+  contactPhone: z.string().min(8).optional(),
+}).superRefine((d, ctx) => {
+  if (d.contactEmail && !d.emailVerificationToken) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['emailVerificationToken'], message: 'Please verify the email via OTP' });
+  if (d.contactPhone && !d.phoneVerificationToken) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['phoneVerificationToken'], message: 'Please verify the phone number via OTP' });
 });
 
 // Owner edits an existing society

@@ -7,7 +7,7 @@ import { User } from '../models/user.model';
 import { Society } from '../models/society.model';
 import { createResidentSchema, updateResidentSchema } from '../validators/society.validator';
 import EmailService from '../services/email.service';
-import { hashPassword } from '../utils/hash.util';
+import { attachTenantMembership } from '../services/identity.service';
 import { TenantType, UserRole } from '../constants/roles';
 
 export const getResidentsByFlat = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -58,83 +58,59 @@ export const addResident = async (req: Request, res: Response, next: NextFunctio
     }
 
     const email = validatedData.email.toLowerCase();
-    let user = await User.findOne({ email }).session(session);
-    let isNewUser = false;
-    let passwordStr = '';
-
-    if (!user) {
-      isNewUser = true;
-      passwordStr = crypto.randomBytes(6).toString('hex');
-      const passwordHash = await hashPassword(passwordStr);
-      
-      user = new User({
-        name: validatedData.name,
-        email,
-        passwordHash,
-        memberships: [],
-      });
-    }
-
     const role = validatedData.relationship === 'TENANT' ? UserRole.RESIDENT_TENANT : UserRole.FAMILY_MEMBER;
 
-    const hasMembership = user.memberships.some(
-      (m) => m.tenantId.toString() === societyId && m.tenantType === TenantType.SOCIETY
-    );
+    // Identifier-scoped, passwordless: attach the role to the email + phone identities.
+    const identities = await attachTenantMembership({
+      email,
+      phone: validatedData.phone,
+      name: validatedData.name,
+      tenantType: TenantType.SOCIETY,
+      tenantId: societyId,
+      role,
+    }, session);
 
-    if (!hasMembership) {
-      user.memberships.push({
-        tenantType: TenantType.SOCIETY,
-        tenantId: new mongoose.Types.ObjectId(societyId),
-        role,
-      });
-    } else {
-      // Check if they are already in this flat
-      const existingResident = await Resident.findOne({
+    const identityIds = [identities.emailUser?._id, identities.phoneUser?._id]
+      .filter(Boolean) as mongoose.Types.ObjectId[];
+
+    let lastResident: any = null;
+    let created = 0;
+    for (const uid of identityIds) {
+      const existing = await Resident.findOne({ flatId: flat._id, userId: uid }).session(session);
+      if (existing) continue;
+      lastResident = new Resident({
         flatId: flat._id,
-        userId: user._id,
-      }).session(session);
-      
-      if (existingResident) {
-        res.status(400).json({ error: 'User is already a resident of this flat' });
-        return;
-      }
+        societyId: new mongoose.Types.ObjectId(societyId),
+        userId: uid,
+        relationship: validatedData.relationship,
+        isOwner: false,
+        isActive: true,
+        createdBy: new mongoose.Types.ObjectId(userId),
+        createdByName: userName,
+        updatedBy: new mongoose.Types.ObjectId(userId),
+        updatedByName: userName,
+      });
+      await lastResident.save({ session });
+      flat.residents.push(lastResident._id as any);
+      created++;
     }
 
-    await user.save({ session });
+    if (created === 0) {
+      await session.abortTransaction();
+      session.endSession();
+      res.status(400).json({ error: 'This person is already a resident of this flat' });
+      return;
+    }
 
-    const newResident = new Resident({
-      flatId: flat._id,
-      societyId: new mongoose.Types.ObjectId(societyId),
-      userId: user._id,
-      relationship: validatedData.relationship,
-      isOwner: false,
-      isActive: true,
-      createdBy: new mongoose.Types.ObjectId(userId),
-      createdByName: userName,
-      updatedBy: new mongoose.Types.ObjectId(userId),
-      updatedByName: userName,
-    });
-    
-    await newResident.save({ session });
-    
-    flat.residents.push(newResident._id as any);
     await flat.save({ session });
 
-    if (isNewUser) {
-      const society = await Society.findById(societyId).select('name').session(session);
-      EmailService.sendResidentCreatedEmail(
-        email,
-        validatedData.name,
-        flat.number,
-        society?.name || 'Society',
-        passwordStr
-      );
-    }
+    const society = await Society.findById(societyId).select('name').session(session);
+    EmailService.sendTenantAccessEmail(email, flat.number, 'flat', [['Society', society?.name || 'Society']]);
 
     await session.commitTransaction();
     session.endSession();
 
-    res.status(201).json({ message: 'Resident added successfully', resident: newResident });
+    res.status(201).json({ message: 'Resident added successfully', resident: lastResident });
   } catch (error: any) {
     await session.abortTransaction();
     session.endSession();

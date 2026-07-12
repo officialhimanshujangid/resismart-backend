@@ -3,6 +3,8 @@ import { appConfig, assertConfig, isRazorpayConfigured } from './config/appConfi
 import { connectDatabase } from './config/db';
 import { logger } from './utils/logger.util';
 import { startCronJobs } from './services/cron.service';
+import { Otp } from './models/otp.model';
+import { User } from './models/user.model';
 
 const startServer = async () => {
   // Fail fast if critical secrets are missing (production)
@@ -14,6 +16,18 @@ const startServer = async () => {
 
   // Connect to MongoDB
   await connectDatabase();
+
+  // Reconcile OTP indexes — the model was generalized from phone-only to
+  // channel+target, so drop the obsolete {phone,purpose} unique index that
+  // would otherwise collide on channel-based docs.
+  try {
+    await Otp.syncIndexes();
+    // User email became sparse-unique (was required+unique) to support phone-only
+    // login identities — reconcile so null-email identities don't collide.
+    await User.syncIndexes();
+  } catch (err: any) {
+    logger.warn(`[startup] syncIndexes failed: ${err.message}`);
+  }
 
   // Register scheduled jobs (expiry reminders + auto-expire)
   startCronJobs();

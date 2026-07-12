@@ -92,7 +92,10 @@ const SocietySchema = new Schema<ISociety>({
 
 // Indexes for fast querying
 SocietySchema.index({ createdBy: 1 });
-SocietySchema.index({ name: 1 });
+// Case-insensitive unique name — backstops the controller pre-check against a
+// duplicate-registration race. (If a pre-existing DB has duplicate names, this
+// index build fails and must be resolved with a manual dedupe + rebuild.)
+SocietySchema.index({ name: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
 SocietySchema.index({ status: 1 });
 SocietySchema.index({ location: '2dsphere' });
 

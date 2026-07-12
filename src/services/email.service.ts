@@ -269,6 +269,25 @@ class EmailService {
     this.sendEmail({ to: toEmail, subject: `Payment received — ${planName} active`, html });
   }
 
+  /**
+   * Passwordless access notice — sent when a tenant identity (society admin,
+   * flat owner, shop admin) is provisioned. No password: they log in with a
+   * one-time code sent to their email or phone.
+   */
+  static sendTenantAccessEmail(toEmail: string, entityName: string, kind: 'society' | 'flat' | 'shop', extraRows: Array<[string, string]> = []): void {
+    const loginLink = `${appConfig.frontendUrl}/login`;
+    const noun = kind === 'flat' ? 'flat/plot' : kind;
+    const html = this.layout({
+      heading: `You have access to your ${noun} 🎉`,
+      accent: '#16a34a',
+      body: this.p(`Your ${noun} <strong>${entityName}</strong> is ready in ${appConfig.appName}.`) +
+        this.infoBox([[kind === 'shop' ? 'Shop' : kind === 'flat' ? 'Flat/Plot' : 'Society', entityName], ['Sign-in', toEmail], ...extraRows]) +
+        this.p(`No password needed — just log in with your <strong>email or phone number</strong> and we'll send a one-time code to verify it.`) +
+        this.button('Log in', loginLink),
+    });
+    this.sendEmail({ to: toEmail, subject: `Access ready — ${entityName} — ${appConfig.appName}`, html });
+  }
+
   static sendFlatOwnerCreatedEmail(toEmail: string, ownerName: string, flatNumber: string, blockName: string, societyName: string, passwordStr: string): void {
     const loginUrl = `${appConfig.frontendUrl}/login`;
     const html = this.layout({
@@ -291,6 +310,46 @@ class EmailService {
         this.p(`<span style="color:#94a3b8;font-size:13px;">Please change your password immediately after logging in.</span>`),
     });
     this.sendEmail({ to: toEmail, subject: `You've been added as a resident — ${appConfig.appName}`, html });
+  }
+
+  /**
+   * Sent when a NEW unit (flat/plot/shop) is linked to an already-registered
+   * account. No password is issued — the user logs in with their existing one
+   * and the new unit appears in their workspace switcher.
+   */
+  static sendUnitAddedEmail(
+    toEmail: string,
+    userName: string,
+    unitLabel: string,
+    tenantName: string,
+    kind: 'flat' | 'plot' | 'shop' = 'flat'
+  ): void {
+    const loginUrl = `${appConfig.frontendUrl}/login`;
+    const kindTitle = kind.charAt(0).toUpperCase() + kind.slice(1);
+    const html = this.layout({
+      heading: `A new ${kind} was added to your account`,
+      accent: '#16a34a',
+      body: this.p(`Hi ${userName}, a new ${kind} has been linked to your existing ${appConfig.appName} account.`) +
+        this.infoBox([[kindTitle, unitLabel], [kind === 'shop' ? 'Shop' : 'Society', tenantName], ['Email', toEmail]]) +
+        this.p(`Just log in with your <strong>existing password</strong> — no new credentials are needed. After signing in, use the workspace switcher to move between your units.`) +
+        this.button('Log in', loginUrl),
+    });
+    this.sendEmail({ to: toEmail, subject: `New ${kind} added to your account — ${appConfig.appName}`, html });
+  }
+
+  /** One-time verification code, delivered to the real inbox (email channel is never shown on screen). */
+  static sendOtpEmail(toEmail: string, code: string, ttlMinutes: number): void {
+    const html = this.layout({
+      heading: 'Verify your email address',
+      preheader: `Your ${appConfig.appName} verification code`,
+      body: this.p(`Use the code below to verify this email address. It expires in ${ttlMinutes} minutes.`) +
+        `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0;">
+           <tr><td style="background:#f1f5f9;border:1px solid #e2e8f0;border-radius:12px;padding:18px 28px;
+             font-size:32px;font-weight:800;letter-spacing:10px;color:#0f172a;text-align:center;">${code}</td></tr>
+         </table>` +
+        this.p(`<span style="color:#94a3b8;font-size:13px;">If you didn't request this, you can safely ignore this email.</span>`),
+    });
+    this.sendEmail({ to: toEmail, subject: `${code} is your ${appConfig.appName} verification code`, html });
   }
 }
 

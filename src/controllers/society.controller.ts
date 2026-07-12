@@ -7,7 +7,6 @@ import { Society } from '../models/society.model';
 
 import { User } from '../models/user.model';
 import {
-  createSocietySchema,
   registerSocietyPublicSchema,
   registerSocietyAdminSchema,
   updateSocietySchema,
@@ -16,6 +15,9 @@ import {
 import { AuditService } from '../services/audit.service';
 import EmailService from '../services/email.service';
 import { hashPassword } from '../utils/hash.util';
+import { normalizePhone } from '../utils/phone.util';
+import { assertVerified, consumeVerification } from '../services/otp.service';
+import { attachTenantMembership, primaryIdentityId } from '../services/identity.service';
 import { TenantType, UserRole } from '../constants/roles';
 
 // Extract the optional extended detail fields, dropping empty strings.
@@ -29,58 +31,6 @@ const pickDetails = (d: any) => {
   });
   return out;
 };
-
-export const createSociety = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  try {
-    const validatedData = createSocietySchema.parse(req.body);
-    const userId = req.user?.userId;
-    const userName = req.user?.userName;
-
-    if (!userId || !userName) {
-      res.status(401).json({ error: 'Unauthorized credentials' });
-      return;
-    }
-
-    const newSociety = await Society.create({
-      name: validatedData.name,
-      address: validatedData.address,
-      createdBy: new mongoose.Types.ObjectId(userId),
-      createdByName: userName,
-      updatedBy: new mongoose.Types.ObjectId(userId),
-      updatedByName: userName,
-    });
-
-    AuditService.log({
-      userId,
-      userName,
-      tenantId: newSociety._id.toString(),
-      tenantType: TenantType.SOCIETY,
-      action: 'SOCIETY_CREATE',
-      resource: 'Society',
-      resourceId: newSociety._id.toString(),
-      ipAddress: req.ip || 'unknown',
-      userAgent: req.headers['user-agent'] || 'unknown',
-      newValues: { name: newSociety.name, address: newSociety.address },
-    });
-
-    res.status(201).json({
-      message: 'Society created successfully',
-      society: newSociety,
-    });
-  } catch (error: any) {
-    if (error.name === 'ZodError') {
-      res.status(400).json({ errors: error.errors });
-      return;
-    }
-    next(error);
-  }
-};
-
-
 
 /**
  * Paginated society listing for the platform owner dashboard.
@@ -300,7 +250,27 @@ export const registerSocietyPublic = async (req: Request, res: Response, next: N
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const { name, address, latitude, longitude, contactName, contactEmail } = parsed.data;
+    const { name, address, latitude, longitude, contactName, contactEmail, contactPhone, emailVerificationToken, phoneVerificationToken } = parsed.data;
+
+    // Both the login email and the org phone must be OTP-verified before accepting.
+    const normPhone = normalizePhone(contactPhone);
+    const normEmail = contactEmail.toLowerCase();
+    if (!normPhone) {
+      res.status(400).json({ error: 'A valid phone number is required.' });
+      return;
+    }
+    const [emailOk, phoneOk] = await Promise.all([
+      assertVerified(emailVerificationToken, 'EMAIL', normEmail, 'SOCIETY_REGISTRATION'),
+      assertVerified(phoneVerificationToken, 'PHONE', normPhone, 'SOCIETY_REGISTRATION'),
+    ]);
+    if (!emailOk) {
+      res.status(400).json({ error: 'Email not verified. Please verify the code sent to your email.' });
+      return;
+    }
+    if (!phoneOk) {
+      res.status(400).json({ error: 'Phone number not verified. Please verify the OTP.' });
+      return;
+    }
 
     const existing = await Society.findOne({ name: new RegExp(`^${name}$`, 'i') }).lean();
     if (existing) {
@@ -320,11 +290,18 @@ export const registerSocietyPublic = async (req: Request, res: Response, next: N
       contactName,
       contactEmail,
       ...pickDetails(parsed.data),
+      contactPhone: normPhone, // store the normalized, verified number
       createdBy: placeholderUserId,
       createdByName: contactName,
       updatedBy: placeholderUserId,
       updatedByName: contactName,
     });
+
+    // One-time use: burn the verifications so the tokens can't create another society.
+    await Promise.all([
+      consumeVerification('EMAIL', normEmail, 'SOCIETY_REGISTRATION'),
+      consumeVerification('PHONE', normPhone, 'SOCIETY_REGISTRATION'),
+    ]);
 
     EmailService.sendSocietyPendingEmail(contactEmail, name);
 
@@ -347,7 +324,27 @@ export const registerSocietyAdmin = async (req: Request, res: Response, next: Ne
       res.status(400).json({ error: parsed.error.errors[0].message });
       return;
     }
-    const { name, address, latitude, longitude, contactName, contactEmail } = parsed.data;
+    const { name, address, latitude, longitude, contactName, contactEmail, contactPhone, emailVerificationToken, phoneVerificationToken } = parsed.data;
+
+    if (contactPhone) {
+      const normPhone = normalizePhone(contactPhone);
+      const phoneOk = await assertVerified(phoneVerificationToken!, 'PHONE', normPhone!, 'SOCIETY_REGISTRATION');
+      if (!phoneOk) {
+        res.status(400).json({ error: 'Phone number not verified. Please verify the OTP.' });
+        return;
+      }
+      await consumeVerification('PHONE', normPhone!, 'SOCIETY_REGISTRATION');
+    }
+
+    if (contactEmail) {
+      const normEmail = contactEmail.toLowerCase();
+      const emailOk = await assertVerified(emailVerificationToken!, 'EMAIL', normEmail, 'SOCIETY_REGISTRATION');
+      if (!emailOk) {
+        res.status(400).json({ error: 'Email not verified. Please verify the code sent to your email.' });
+        return;
+      }
+      await consumeVerification('EMAIL', normEmail, 'SOCIETY_REGISTRATION');
+    }
 
     const superOwnerId = req.user?.userId ? new mongoose.Types.ObjectId(req.user.userId) : new mongoose.Types.ObjectId();
     const superOwnerName = req.user?.userName || 'Super Admin';
@@ -363,6 +360,7 @@ export const registerSocietyAdmin = async (req: Request, res: Response, next: Ne
       contactName,
       contactEmail,
       ...pickDetails(parsed.data),
+      ...(parsed.data.contactPhone ? { contactPhone: normalizePhone(parsed.data.contactPhone) } : {}),
       createdBy: superOwnerId,
       createdByName: superOwnerName,
       updatedBy: superOwnerId,
@@ -485,28 +483,18 @@ export const rejectSociety = async (req: Request, res: Response, next: NextFunct
  * Creates (or links) the SOCIETY_ADMIN user for a society and emails credentials.
  */
 async function provisionSocietyAdmin(society: any, email: string, name: string): Promise<void> {
-  let user = await User.findOne({ email: email.toLowerCase() });
-  const tempPassword = crypto.randomBytes(6).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 10) + 'A1';
+  // Identifier-scoped, passwordless: grant SOCIETY_ADMIN to BOTH the email identity
+  // AND the phone identity, so logging in with either surfaces this society.
+  const result = await attachTenantMembership({
+    email,
+    phone: society.contactPhone,
+    name,
+    tenantType: TenantType.SOCIETY,
+    tenantId: society._id,
+    role: UserRole.SOCIETY_ADMIN,
+  });
 
-  if (!user) {
-    user = await User.create({
-      name,
-      email: email.toLowerCase(),
-      passwordHash: await hashPassword(tempPassword),
-      isActive: true,
-      memberships: [{ tenantType: TenantType.SOCIETY, tenantId: society._id, role: UserRole.SOCIETY_ADMIN }],
-    });
-    EmailService.sendSocietyApprovedEmail(email, society.name, tempPassword);
-  } else {
-    const already = user.memberships.some(
-      (m: any) => m.tenantId.toString() === society._id.toString() && m.role === UserRole.SOCIETY_ADMIN
-    );
-    if (!already) {
-      user.memberships.push({ tenantType: TenantType.SOCIETY, tenantId: society._id, role: UserRole.SOCIETY_ADMIN } as any);
-      await user.save();
-    }
-  }
-
-  society.adminUserId = user._id;
+  society.adminUserId = primaryIdentityId(result);
+  if (email) EmailService.sendTenantAccessEmail(email, society.name, 'society');
 }
 

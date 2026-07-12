@@ -7,6 +7,10 @@ export interface ISecureJwtPayload {
   activeTenantId?: string;
   activeTenantType?: TenantType;
   activeRole?: UserRole;
+  // Unit-granular session: which flat/plot/shop inside the tenant is active.
+  activeUnitType?: 'FLAT' | 'SHOP';
+  activeUnitId?: string;
+  activeContextId?: string;
 }
 
 export const generateAccessToken = (payload: ISecureJwtPayload): string => {

@@ -13,6 +13,9 @@ import { createFlatSchema, updateFlatSchema, bulkUploadFlatRowSchema } from '../
 import { AuditService } from '../services/audit.service';
 import EmailService from '../services/email.service';
 import { hashPassword } from '../utils/hash.util';
+import { normalizePhone } from '../utils/phone.util';
+import { assertVerified, consumeVerification } from '../services/otp.service';
+import { attachTenantMembership, primaryIdentityId } from '../services/identity.service';
 import { TenantType, UserRole } from '../constants/roles';
 
 export const createFlat = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -50,54 +53,54 @@ export const createFlat = async (req: Request, res: Response, next: NextFunction
     }
 
     let ownerUserId: mongoose.Types.ObjectId | undefined;
+    let ownerIdentityIds: mongoose.Types.ObjectId[] = [];
     let newResident: any = null;
+    // Consumed after the transaction commits so the one-time tokens can't be reused.
+    let consumeEmail = '';
+    let consumePhone = '';
 
     if (validatedData.ownerEmail && validatedData.ownerName) {
       const email = validatedData.ownerEmail.toLowerCase();
-      let user = await User.findOne({ email }).session(session);
-      let isNewUser = false;
-      let passwordStr = '';
+      const normPhone = validatedData.ownerPhone ? normalizePhone(validatedData.ownerPhone) : '';
 
-      if (!user) {
-        isNewUser = true;
-        passwordStr = crypto.randomBytes(6).toString('hex');
-        const passwordHash = await hashPassword(passwordStr);
-
-        user = new User({
-          name: validatedData.ownerName,
-          email,
-          passwordHash,
-          memberships: [],
-        });
+      if (!normPhone) {
+        await session.abortTransaction();
+        session.endSession();
+        res.status(400).json({ error: 'A valid owner phone number is required.' });
+        return;
       }
 
-      const hasMembership = user.memberships.some(
-        (m) => m.tenantId.toString() === societyId && m.tenantType === TenantType.SOCIETY
-      );
-
-      if (!hasMembership) {
-        user.memberships.push({
-          tenantType: TenantType.SOCIETY,
-          tenantId: new mongoose.Types.ObjectId(societyId),
-          role: UserRole.RESIDENT_OWNER,
-        });
+      // BOTH the owner email and phone must be OTP-verified.
+      const [emailOk, phoneOk] = await Promise.all([
+        assertVerified(validatedData.ownerEmailVerificationToken || '', 'EMAIL', email, 'FLAT_REGISTRATION'),
+        assertVerified(validatedData.ownerPhoneVerificationToken || '', 'PHONE', normPhone, 'FLAT_REGISTRATION'),
+      ]);
+      if (!emailOk || !phoneOk) {
+        await session.abortTransaction();
+        session.endSession();
+        res.status(400).json({ error: `Owner ${!emailOk ? 'email' : 'phone number'} is not verified. Please verify via OTP.` });
+        return;
       }
 
-      await user.save({ session });
-      ownerUserId = user._id;
+      // Identifier-scoped, passwordless: grant RESIDENT_OWNER to BOTH the email
+      // identity and the phone identity so either can log in and see this flat.
+      const identities = await attachTenantMembership({
+        email,
+        phone: normPhone,
+        name: validatedData.ownerName,
+        tenantType: TenantType.SOCIETY,
+        tenantId: societyId,
+        role: UserRole.RESIDENT_OWNER,
+      }, session);
 
-      // Email the owner
-      if (isNewUser) {
-        const society = await Society.findById(societyId).select('name').session(session);
-        EmailService.sendFlatOwnerCreatedEmail(
-          email,
-          validatedData.ownerName,
-          validatedData.number,
-          block.name,
-          society?.name || 'Society',
-          passwordStr
-        );
-      }
+      ownerUserId = primaryIdentityId(identities);
+      ownerIdentityIds = [identities.emailUser?._id, identities.phoneUser?._id]
+        .filter(Boolean) as mongoose.Types.ObjectId[];
+      consumeEmail = email;
+      consumePhone = normPhone;
+
+      const society = await Society.findById(societyId).select('name').session(session);
+      EmailService.sendTenantAccessEmail(email, `${block.name}-${validatedData.number}`, 'flat', [['Society', society?.name || 'Society']]);
     }
 
     // Retrieve society for location if needed
@@ -146,27 +149,33 @@ export const createFlat = async (req: Request, res: Response, next: NextFunction
     const newFlat = new Flat(flatPayload);
     await newFlat.save({ session });
 
-    if (ownerUserId) {
-      newResident = new Resident({
-        flatId: newFlat._id,
-        societyId: new mongoose.Types.ObjectId(societyId),
-        userId: ownerUserId,
-        relationship: 'OWNER',
-        isOwner: true,
-        isActive: true,
-        createdBy: new mongoose.Types.ObjectId(userId),
-        createdByName: userName,
-        updatedBy: new mongoose.Types.ObjectId(userId),
-        updatedByName: userName,
-      });
-      await newResident.save({ session });
-
-      newFlat.residents.push(newResident._id);
+    if (ownerIdentityIds.length) {
+      // One OWNER Resident row per identity (email + phone) so either login sees the flat.
+      for (const uid of ownerIdentityIds) {
+        newResident = new Resident({
+          flatId: newFlat._id,
+          societyId: new mongoose.Types.ObjectId(societyId),
+          userId: uid,
+          relationship: 'OWNER',
+          isOwner: true,
+          isActive: true,
+          createdBy: new mongoose.Types.ObjectId(userId),
+          createdByName: userName,
+          updatedBy: new mongoose.Types.ObjectId(userId),
+          updatedByName: userName,
+        });
+        await newResident.save({ session });
+        newFlat.residents.push(newResident._id);
+      }
       await newFlat.save({ session });
     }
 
     await session.commitTransaction();
     session.endSession();
+
+    // One-time use: burn the owner's verifications now that the flat exists.
+    if (consumeEmail) await consumeVerification('EMAIL', consumeEmail, 'FLAT_REGISTRATION');
+    if (consumePhone) await consumeVerification('PHONE', consumePhone, 'FLAT_REGISTRATION');
 
     AuditService.log({
       userId,
@@ -368,6 +377,8 @@ export const deleteFlat = async (req: Request, res: Response, next: NextFunction
   try {
     const { flatId } = req.params;
     const societyId = req.user?.activeTenantId;
+    const userId = req.user?.userId;
+    const userName = req.user?.userName;
 
     if (!societyId) {
       res.status(403).json({ error: 'No active society tenant' });
@@ -383,6 +394,19 @@ export const deleteFlat = async (req: Request, res: Response, next: NextFunction
     // Remove associated residents
     await Resident.deleteMany({ flatId: flat._id });
     await flat.deleteOne();
+
+    AuditService.log({
+      userId: userId || 'system',
+      userName: userName || 'system',
+      tenantId: societyId,
+      tenantType: TenantType.SOCIETY,
+      action: 'FLAT_DELETE',
+      resource: 'Flat',
+      resourceId: flat._id.toString(),
+      ipAddress: req.ip || 'unknown',
+      userAgent: req.headers['user-agent'] || 'unknown',
+      oldValues: { number: flat.number, blockName: flat.blockName },
+    });
 
     res.status(200).json({ message: 'Flat deleted successfully' });
   } catch (error) {
@@ -558,52 +582,24 @@ export const bulkUploadFlats = async (req: Request, res: Response, next: NextFun
           }
 
           let ownerUserId: mongoose.Types.ObjectId | undefined;
+          let ownerIdentityIds: mongoose.Types.ObjectId[] = [];
           let newResident: any = null;
 
           if (validated.ownerEmail && validated.ownerName) {
+            // Identifier-scoped, passwordless (bulk is admin-trusted, no OTP).
             const email = validated.ownerEmail.toLowerCase();
-            let user = await User.findOne({ email }).session(session);
-            let isNewUser = false;
-            let passwordStr = '';
-
-            if (!user) {
-              isNewUser = true;
-              passwordStr = crypto.randomBytes(6).toString('hex');
-              const passwordHash = await hashPassword(passwordStr);
-
-              user = new User({
-                name: validated.ownerName,
-                email,
-                passwordHash,
-                memberships: [],
-              });
-            }
-
-            const hasMembership = user.memberships.some(
-              (m) => m.tenantId.toString() === societyId && m.tenantType === TenantType.SOCIETY
-            );
-
-            if (!hasMembership) {
-              user.memberships.push({
-                tenantType: TenantType.SOCIETY,
-                tenantId: new mongoose.Types.ObjectId(societyId),
-                role: UserRole.RESIDENT_OWNER,
-              });
-            }
-
-            await user.save({ session });
-            ownerUserId = user._id;
-
-            if (isNewUser) {
-              EmailService.sendFlatOwnerCreatedEmail(
-                email,
-                validated.ownerName,
-                validated.number,
-                blockName,
-                society?.name || 'Society',
-                passwordStr
-              );
-            }
+            const identities = await attachTenantMembership({
+              email,
+              phone: validated.ownerPhone,
+              name: validated.ownerName,
+              tenantType: TenantType.SOCIETY,
+              tenantId: societyId,
+              role: UserRole.RESIDENT_OWNER,
+            }, session);
+            ownerUserId = primaryIdentityId(identities);
+            ownerIdentityIds = [identities.emailUser?._id, identities.phoneUser?._id]
+              .filter(Boolean) as mongoose.Types.ObjectId[];
+            EmailService.sendTenantAccessEmail(email, `${blockName}-${validated.number}`, 'flat', [['Society', society?.name || 'Society']]);
           }
 
           const flatPayload: any = {
@@ -638,22 +634,23 @@ export const bulkUploadFlats = async (req: Request, res: Response, next: NextFun
           const newFlat = new Flat(flatPayload);
           await newFlat.save({ session });
 
-          if (ownerUserId) {
-            newResident = new Resident({
-              flatId: newFlat._id,
-              societyId: new mongoose.Types.ObjectId(societyId),
-              userId: ownerUserId,
-              relationship: 'OWNER',
-              isOwner: true,
-              isActive: true,
-              createdBy: new mongoose.Types.ObjectId(userId),
-              createdByName: userName,
-              updatedBy: new mongoose.Types.ObjectId(userId),
-              updatedByName: userName,
-            });
-            await newResident.save({ session });
-
-            newFlat.residents.push(newResident._id);
+          if (ownerIdentityIds.length) {
+            for (const uid of ownerIdentityIds) {
+              newResident = new Resident({
+                flatId: newFlat._id,
+                societyId: new mongoose.Types.ObjectId(societyId),
+                userId: uid,
+                relationship: 'OWNER',
+                isOwner: true,
+                isActive: true,
+                createdBy: new mongoose.Types.ObjectId(userId),
+                createdByName: userName,
+                updatedBy: new mongoose.Types.ObjectId(userId),
+                updatedByName: userName,
+              });
+              await newResident.save({ session });
+              newFlat.residents.push(newResident._id);
+            }
             await newFlat.save({ session });
           }
 
