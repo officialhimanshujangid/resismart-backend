@@ -25,6 +25,7 @@ const GlobalSettingSchema = new Schema({
       max_visitor_count: 500,
       max_tickets_count: 100,
       max_service_count: 10,
+      max_active_listings: 5,
     }
   },
   expiryReminderDays: {

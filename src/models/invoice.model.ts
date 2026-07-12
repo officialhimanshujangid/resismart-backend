@@ -6,7 +6,7 @@ export interface IInvoice extends Document {
   subscriptionId?: mongoose.Types.ObjectId; // linked once payment succeeds
   planId?: mongoose.Types.ObjectId;
   tenure?: string;
-  invoiceType: 'ONLINE_RAZORPAY' | 'OFFLINE_CASH';
+  invoiceType: 'ONLINE_RAZORPAY' | 'OFFLINE_CASH' | 'AD_BOOST';
   
   // For Razorpay
   razorpayInvoiceId?: string;
@@ -44,7 +44,7 @@ const InvoiceSchema = new Schema<IInvoice>({
   subscriptionId: { type: Schema.Types.ObjectId, ref: 'Subscription' },
   planId: { type: Schema.Types.ObjectId, ref: 'Plan' },
   tenure: { type: String },
-  invoiceType: { type: String, enum: ['ONLINE_RAZORPAY', 'OFFLINE_CASH'], required: true },
+  invoiceType: { type: String, enum: ['ONLINE_RAZORPAY', 'OFFLINE_CASH', 'AD_BOOST'], required: true },
   
   razorpayInvoiceId: { type: String },
   razorpayOrderId: { type: String },

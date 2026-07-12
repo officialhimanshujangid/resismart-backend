@@ -23,6 +23,7 @@ export const getResidentsByFlat = async (req: Request, res: Response, next: Next
     const residents = await Resident.find({
       flatId: new mongoose.Types.ObjectId(flatId),
       societyId: new mongoose.Types.ObjectId(societyId),
+      isActive: true,
     }).populate('userId', 'name email phone profileImage').sort({ isOwner: -1, createdAt: 1 });
 
     res.status(200).json({ residents });

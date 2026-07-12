@@ -21,6 +21,8 @@ import userRoutes from './routes/user.routes';
 import flatSizeRoutes from './routes/flat-size.routes';
 import dashboardRoutes from './routes/dashboard.routes';
 import meRoutes from './routes/me.routes';
+import marketplaceRoutes from './routes/marketplace.routes';
+import publicMarketplaceRoutes from './routes/public-marketplace.routes';
 import { errorHandler } from './middlewares/error.middleware';
 import { requestLogger } from './middlewares/logger.middleware';
 
@@ -110,6 +112,8 @@ app.use('/api/v1/dashboard', dashboardRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/flat-sizes', flatSizeRoutes);
 app.use('/api/v1/me', meRoutes);
+app.use('/api/v1/marketplace', marketplaceRoutes);
+app.use('/api/v1/public/marketplace', publicMarketplaceRoutes);
 
 // 10. JSON 404 for unknown routes
 app.use((req, res) => {

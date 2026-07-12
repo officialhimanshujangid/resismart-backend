@@ -32,6 +32,24 @@ import {
   updateResident,
   removeResident,
 } from '../controllers/resident.controller';
+import {
+  createRegistrationRequest,
+  listRegistrationRequests,
+  approveRegistrationRequest,
+  rejectRegistrationRequest,
+  cancelRegistrationRequest,
+} from '../controllers/membership-request.controller';
+import {
+  rentOutFlat,
+  sellFlat,
+  endTenancy,
+  moveIn,
+  setVacant,
+  getTimeline,
+  addHistoricalTenure,
+  updateTenure,
+  deleteTenure,
+} from '../controllers/flat-lifecycle.controller';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
 import { enforceLimit } from '../middlewares/subscription.guard';
 import { uploadExcel } from '../middlewares/upload.middleware';
@@ -96,6 +114,31 @@ router.get('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, get
 router.post('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), addResident);
 router.put('/residents/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), updateResident);
 router.delete('/residents/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), removeResident);
+
+// --- Resident registration requests (two-way approval) ---
+router.post(
+  '/flats/:flatId/registration-requests',
+  authenticateJWT,
+  enforceTenantAccess,
+  authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER, UserRole.RESIDENT_TENANT]),
+  createRegistrationRequest
+);
+router.get('/registration-requests', authenticateJWT, enforceTenantAccess, listRegistrationRequests);
+router.post('/registration-requests/:requestId/approve', authenticateJWT, enforceTenantAccess, approveRegistrationRequest);
+router.post('/registration-requests/:requestId/reject', authenticateJWT, enforceTenantAccess, rejectRegistrationRequest);
+router.post('/registration-requests/:requestId/cancel', authenticateJWT, enforceTenantAccess, cancelRegistrationRequest);
+
+// --- Flat lifecycle & timeline (rent / sell / occupancy) ---
+const LIFECYCLE_ROLES = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER];
+router.get('/flats/:flatId/timeline', authenticateJWT, enforceTenantAccess, getTimeline);
+router.post('/flats/:flatId/rent-out', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), rentOutFlat);
+router.post('/flats/:flatId/sell', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), sellFlat);
+router.post('/flats/:flatId/end-tenancy', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), endTenancy);
+router.post('/flats/:flatId/move-in', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), moveIn);
+router.post('/flats/:flatId/set-vacant', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), setVacant);
+router.post('/flats/:flatId/tenures', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), addHistoricalTenure);
+router.put('/tenures/:tenureId', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), updateTenure);
+router.delete('/tenures/:tenureId', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), deleteTenure);
 
 // --- Owner: single society + update + approve/reject (kept after /flats to avoid path clash) ---
 router.get('/:id', authenticateJWT, authorizeRoles(OWNER), getSocietyById);

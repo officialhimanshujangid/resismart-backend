@@ -15,6 +15,7 @@ import { AuditService } from '../services/audit.service';
 import { resolveTenantEmail } from '../utils/tenant-email.util';
 import { getGoverningSubscription, getEffectiveLimits, capsToObject } from '../services/subscription-lifecycle.service';
 import { runExpireOverdue, runExpiryReminders } from '../services/cron.service';
+import { activateBoostByOrder } from '../services/listing-boost.service';
 import { TenantType } from '../constants/roles';
 import { appConfig, isRazorpayConfigured } from '../config/appConfig';
 import { logger } from '../utils/logger.util';
@@ -206,6 +207,10 @@ export class BillingController {
         }
       } else if (type === 'subscription.charged' && rzpSubId) {
         await BillingController.handleSubscriptionCharged(rzpSubId, paymentId);
+      } else if (type === 'order.paid') {
+        // Ad-boost orders (Phase 4). No-op for non-boost orders (returns null).
+        const orderId = event?.payload?.order?.entity?.id;
+        if (orderId) await activateBoostByOrder(orderId, paymentId);
       } else if ((type === 'subscription.cancelled' || type === 'subscription.completed') && rzpSubId) {
         const localSub = await Subscription.findOne({ razorpaySubscriptionId: rzpSubId });
         if (localSub && !['cancelled', 'expired'].includes(localSub.status)) {

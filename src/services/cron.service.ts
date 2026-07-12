@@ -5,6 +5,10 @@ import { Plan } from '../models/plan.model';
 import EmailService from './email.service';
 import { resolveTenantEmail } from '../utils/tenant-email.util';
 import { assignFreeTier } from './subscription-lifecycle.service';
+import { expireDueBoosts } from './listing-boost.service';
+import { SavedSearch } from '../models/saved-search.model';
+import { PropertyListing } from '../models/property-listing.model';
+import { User } from '../models/user.model';
 import { logger } from '../utils/logger.util';
 
 const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
@@ -105,20 +109,68 @@ export async function runExpireOverdue(): Promise<void> {
   if (revertedCount) logger.info(`[cron] ${revertedCount} plan(s) reverted to Free tier`);
 }
 
+/** Emails saved-search owners when new listings match their criteria. */
+export async function runSavedSearchAlerts(): Promise<void> {
+  const now = new Date();
+  const searches = await SavedSearch.find({ alertsEnabled: true }).lean();
+  let notified = 0;
+
+  for (const s of searches) {
+    const cutoff = s.lastNotifiedAt || new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const c = s.criteria || {};
+    const match: Record<string, any> = { status: 'ACTIVE', publishedAt: { $gt: cutoff } };
+    if (c.kind) match.kind = c.kind;
+    if (c.city) match.city = { $regex: c.city, $options: 'i' };
+    if (c.pincode) match.pincode = c.pincode;
+    if (c.bedrooms !== undefined) match.bedrooms = { $gte: c.bedrooms };
+    if (c.minPaise !== undefined || c.maxPaise !== undefined) {
+      match.pricePaise = {};
+      if (c.minPaise !== undefined) match.pricePaise.$gte = c.minPaise;
+      if (c.maxPaise !== undefined) match.pricePaise.$lte = c.maxPaise;
+    }
+
+    const matches = await PropertyListing.find(match).sort({ publishedAt: -1 }).limit(10).select('title pricePaise priceType city slug').lean();
+    await SavedSearch.updateOne({ _id: s._id }, { $set: { lastNotifiedAt: now } });
+    if (!matches.length) continue;
+
+    const user = await User.findById(s.userId).select('email name').lean();
+    if (!user?.email) continue;
+    const rows = matches.map((m) => `<li><strong>${m.title}</strong> — ₹${(m.pricePaise / 100).toLocaleString('en-IN')}${m.priceType === 'PER_MONTH' ? '/mo' : ''}${m.city ? ` · ${m.city}` : ''}</li>`).join('');
+    EmailService.sendEmail({
+      to: user.email,
+      subject: `${matches.length} new propert${matches.length === 1 ? 'y' : 'ies'} match your saved search`,
+      html: `<p>New listings matching "${s.name || 'your saved search'}":</p><ul>${rows}</ul>`,
+    });
+    notified++;
+  }
+  if (notified) logger.info(`[cron] Sent ${notified} saved-search alert email(s)`);
+}
+
 const runDailyJobs = async () => {
   try {
     await runPromoteScheduled();
     await runExpireOverdue();
     await runExpiryReminders();
+    await runSavedSearchAlerts();
   } catch (err: any) {
     logger.error(`[cron] Daily job failed: ${err.message}`);
   }
 };
 
-/** Registers scheduled jobs. Daily at 09:00 (server timezone). */
+/** Expires ad-boosts whose window has ended, resetting listings to the free base radius. */
+export async function runExpireBoosts(): Promise<void> {
+  try {
+    await expireDueBoosts();
+  } catch (err: any) {
+    logger.error(`[cron] Boost expiry failed: ${err.message}`);
+  }
+}
+
+/** Registers scheduled jobs. Daily subscription jobs at 09:00; boost expiry hourly. */
 export function startCronJobs(): void {
   cron.schedule('0 9 * * *', runDailyJobs);
-  logger.info('[cron] Scheduled daily subscription jobs at 09:00');
+  cron.schedule('0 * * * *', runExpireBoosts);
+  logger.info('[cron] Scheduled daily subscription jobs (09:00) and hourly boost expiry');
 }
 
 export default startCronJobs;

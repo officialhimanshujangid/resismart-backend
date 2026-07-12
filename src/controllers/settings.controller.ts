@@ -10,6 +10,7 @@ const DEFAULT_CAPS = {
   max_visitor_count: 50,
   max_tickets_count: 20,
   max_service_count: 5,
+  max_active_listings: 5,
 };
 
 const serialize = (setting: any) => {
