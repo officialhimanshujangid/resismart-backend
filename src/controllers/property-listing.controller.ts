@@ -24,11 +24,14 @@ const canManage = (req: Request, listing: any): boolean =>
   isAdmin(req.user?.activeRole) || listing.createdByUserId?.toString() === req.user?.userId;
 
 const resolveVerification = (scope: string, flat: any, role?: UserRole, userId?: string) => {
+  // Society-level ad created by admin → always verified (the society is the author)
   if (scope === 'SOCIETY' && isAdmin(role)) return { status: 'VERIFIED' as const, method: 'SOCIETY_ADMIN', verifiedAt: new Date() };
+  // Flat-level ad created by the flat's registered owner → auto-verified by ownership match
   if (scope === 'FLAT' && flat?.ownerUserId && flat.ownerUserId.toString() === userId) {
     return { status: 'VERIFIED' as const, method: 'OWNER_MATCH', verifiedAt: new Date() };
   }
-  if (scope === 'FLAT' && isAdmin(role)) return { status: 'VERIFIED' as const, method: 'ADMIN_VOUCHED', verifiedAt: new Date() };
+  // Flat-level ad created by an ADMIN on behalf of a flat → PENDING_OWNER (flat owner must approve)
+  if (scope === 'FLAT' && isAdmin(role)) return { status: 'PENDING_OWNER' as const, method: 'ADMIN_POSTED' };
   return { status: 'UNVERIFIED' as const };
 };
 
@@ -246,6 +249,86 @@ export const deleteListing = async (req: Request, res: Response, next: NextFunct
     if (!canManage(req, listing)) { res.status(403).json({ error: 'You cannot delete this listing' }); return; }
     await listing.deleteOne();
     res.status(200).json({ message: 'Listing deleted' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Flat owner approves an admin-posted listing for their flat.
+ * Changes verification.status from PENDING_OWNER → VERIFIED.
+ * Only the flat's registered ownerUserId may approve.
+ */
+export const approveVerification = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const userId = req.user?.userId, societyId = req.user?.activeTenantId;
+    if (!userId || !societyId) { res.status(401).json({ error: 'Auth required' }); return; }
+
+    const listing = await PropertyListing.findOne({ _id: req.params.id, societyId: new mongoose.Types.ObjectId(societyId) });
+    if (!listing) { res.status(404).json({ error: 'Listing not found' }); return; }
+    if (listing.verification?.status !== 'PENDING_OWNER') {
+      res.status(400).json({ error: 'This listing is not awaiting your approval' }); return;
+    }
+    if (!listing.flatId) { res.status(400).json({ error: 'Listing has no associated flat' }); return; }
+
+    // Verify the caller is the registered owner of the flat
+    const flat = await Flat.findOne({ _id: listing.flatId, societyId: new mongoose.Types.ObjectId(societyId) }).select('ownerUserId').lean();
+    if (!flat || flat.ownerUserId?.toString() !== userId) {
+      res.status(403).json({ error: 'Only the flat owner can approve this listing' }); return;
+    }
+
+    listing.verification = { status: 'VERIFIED', method: 'OWNER_APPROVED', verifiedAt: new Date(), verifiedBy: new mongoose.Types.ObjectId(userId) };
+    listing.updatedBy = new mongoose.Types.ObjectId(userId);
+    listing.updatedByName = req.user?.userName || 'owner';
+    await listing.save();
+
+    AuditService.log({
+      userId, userName: req.user?.userName || '', tenantId: societyId, tenantType: TenantType.SOCIETY,
+      action: 'LISTING_VERIFY_APPROVED', resource: 'PropertyListing', resourceId: listing._id.toString(),
+      ipAddress: req.ip || 'unknown', userAgent: req.headers['user-agent'] || 'unknown', newValues: { verification: 'VERIFIED' },
+    });
+
+    res.status(200).json({ message: 'Listing approved and verified', listing });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Flat owner rejects an admin-posted listing for their flat.
+ * Returns the listing to DRAFT status (admin can edit and repost).
+ */
+export const rejectVerification = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const userId = req.user?.userId, societyId = req.user?.activeTenantId;
+    if (!userId || !societyId) { res.status(401).json({ error: 'Auth required' }); return; }
+
+    const listing = await PropertyListing.findOne({ _id: req.params.id, societyId: new mongoose.Types.ObjectId(societyId) });
+    if (!listing) { res.status(404).json({ error: 'Listing not found' }); return; }
+    if (listing.verification?.status !== 'PENDING_OWNER') {
+      res.status(400).json({ error: 'This listing is not awaiting your approval' }); return;
+    }
+    if (!listing.flatId) { res.status(400).json({ error: 'Listing has no associated flat' }); return; }
+
+    const flat = await Flat.findOne({ _id: listing.flatId, societyId: new mongoose.Types.ObjectId(societyId) }).select('ownerUserId').lean();
+    if (!flat || flat.ownerUserId?.toString() !== userId) {
+      res.status(403).json({ error: 'Only the flat owner can reject this listing' }); return;
+    }
+
+    // Return to DRAFT — admin can fix and resubmit
+    listing.status = 'DRAFT';
+    listing.verification = { status: 'UNVERIFIED', method: 'OWNER_REJECTED' } as any;
+    listing.updatedBy = new mongoose.Types.ObjectId(userId);
+    listing.updatedByName = req.user?.userName || 'owner';
+    await listing.save();
+
+    AuditService.log({
+      userId, userName: req.user?.userName || '', tenantId: societyId, tenantType: TenantType.SOCIETY,
+      action: 'LISTING_VERIFY_REJECTED', resource: 'PropertyListing', resourceId: listing._id.toString(),
+      ipAddress: req.ip || 'unknown', userAgent: req.headers['user-agent'] || 'unknown', newValues: { verification: 'REJECTED' },
+    });
+
+    res.status(200).json({ message: 'Listing rejected and returned to draft', listing });
   } catch (error) {
     next(error);
   }

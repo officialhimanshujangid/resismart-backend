@@ -2,8 +2,11 @@ import { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import { ListingBoost } from '../models/listing-boost.model';
 import { PropertyListing } from '../models/property-listing.model';
+import { ListingReport } from '../models/listing-report.model';
 import { Society } from '../models/society.model';
+import { User } from '../models/user.model';
 import { AuditService } from '../services/audit.service';
+import EmailService from '../services/email.service';
 import { TenantType } from '../constants/roles';
 
 /** Statuses that represent realized boost revenue (paid, whether still running or ended). */
@@ -95,7 +98,7 @@ export const getAllListings = async (req: Request, res: Response, next: NextFunc
   }
 };
 
-/** SYSTEM_OWNER: take a listing down (moderation). */
+/** SYSTEM_OWNER: take a listing down (moderation). Emails the listing author. */
 export const takedownListing = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const listing = await PropertyListing.findById(req.params.id);
@@ -109,7 +112,57 @@ export const takedownListing = async (req: Request, res: Response, next: NextFun
       action: 'LISTING_TAKEDOWN', resource: 'PropertyListing', resourceId: listing._id.toString(),
       ipAddress: req.ip || 'unknown', userAgent: req.headers['user-agent'] || 'unknown', newValues: { reason: req.body?.reason || null },
     });
+
+    // Notify author best-effort
+    try {
+      const author = await User.findById(listing.createdByUserId).select('email name').lean();
+      if (author?.email) {
+        EmailService.sendListingTakenDownEmail(author.email, author.name, listing.title, req.body?.reason || 'Policy violation');
+      }
+    } catch (_) { /* non-fatal */ }
+
     res.status(200).json({ message: 'Listing taken down', listing });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** SYSTEM_OWNER: paginated listing-report queue. */
+export const getReports = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { page, pageSize, status } = req.query;
+    const filter: Record<string, any> = {};
+    if (status && typeof status === 'string') filter.status = status;
+
+    const currentPage = Math.max(1, parseInt(String(page || '1'), 10));
+    const limit = Math.min(100, Math.max(1, parseInt(String(pageSize || '20'), 10)));
+    const skip = (currentPage - 1) * limit;
+
+    const [rows, total] = await Promise.all([
+      ListingReport.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('listingId', 'title kind status slug')
+        .lean(),
+      ListingReport.countDocuments(filter),
+    ]);
+    res.status(200).json({ reports: rows, pagination: { total, page: currentPage, pageSize: limit, totalPages: Math.ceil(total / limit) } });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** SYSTEM_OWNER: dismiss a listing report (mark as reviewed). */
+export const dismissReport = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const report = await ListingReport.findById(req.params.id);
+    if (!report) { res.status(404).json({ error: 'Report not found' }); return; }
+    report.status = 'DISMISSED';
+    report.reviewedBy = req.user?.userName || 'owner';
+    report.reviewedAt = new Date();
+    await report.save();
+    res.status(200).json({ message: 'Report dismissed', report });
   } catch (error) {
     next(error);
   }

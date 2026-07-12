@@ -3,10 +3,11 @@ import { AdSettingController } from '../controllers/ad-setting.controller';
 import {
   createListing, getMyListings, getListingById, updateListing, deleteListing,
   publishListing, pauseListing, activateListing, markSold, markRented, countActiveListings,
+  approveVerification, rejectVerification,
 } from '../controllers/property-listing.controller';
 import { checkoutBoost, verifyBoost, getBoostStatus, getBoostPackages } from '../controllers/listing-boost.controller';
 import { browseListings, browseListingDetail } from '../controllers/marketplace-browse.controller';
-import { getRevenueStats, getBoostLedger, getAllListings, takedownListing } from '../controllers/marketplace-owner.controller';
+import { getRevenueStats, getBoostLedger, getAllListings, takedownListing, getReports, dismissReport } from '../controllers/marketplace-owner.controller';
 import {
   toggleFavorite, listFavorites, getFavoriteIds, compareListings,
   createSavedSearch, listSavedSearches, updateSavedSearch, deleteSavedSearch, getListingLeads,
@@ -56,6 +57,9 @@ router.post('/listings/:id/pause', authenticateJWT, enforceTenantAccess, authori
 router.post('/listings/:id/activate', authenticateJWT, enforceTenantAccess, authorizeRoles(AUTHOR_ROLES), activateListing);
 router.post('/listings/:id/mark-sold', authenticateJWT, enforceTenantAccess, authorizeRoles(AUTHOR_ROLES), markSold);
 router.post('/listings/:id/mark-rented', authenticateJWT, enforceTenantAccess, authorizeRoles(AUTHOR_ROLES), markRented);
+// Flat owner approval of admin-posted listings
+router.post('/listings/:id/approve-verification', authenticateJWT, enforceTenantAccess, approveVerification);
+router.post('/listings/:id/reject-verification', authenticateJWT, enforceTenantAccess, rejectVerification);
 
 // ── Boost purchase (Razorpay one-time order) ──
 router.get('/boost-packages', authenticateJWT, enforceTenantAccess, getBoostPackages);
@@ -84,5 +88,7 @@ router.get('/owner/revenue/stats', authenticateJWT, authorizeRoles(OWNER), getRe
 router.get('/owner/revenue/boosts', authenticateJWT, authorizeRoles(OWNER), getBoostLedger);
 router.get('/owner/listings', authenticateJWT, authorizeRoles(OWNER), getAllListings);
 router.post('/owner/listings/:id/takedown', authenticateJWT, authorizeRoles(OWNER), takedownListing);
+router.get('/owner/reports', authenticateJWT, authorizeRoles(OWNER), getReports);
+router.post('/owner/reports/:id/dismiss', authenticateJWT, authorizeRoles(OWNER), dismissReport);
 
 export default router;

@@ -351,6 +351,57 @@ class EmailService {
     });
     this.sendEmail({ to: toEmail, subject: `${code} is your ${appConfig.appName} verification code`, html });
   }
+
+  /** Marketplace: new inquiry (lead) on a listing — sent to the listing owner. */
+  static sendLeadNotificationEmail(
+    to: string, ownerName: string, listingTitle: string,
+    inquirerName: string, phone: string, message?: string,
+  ): void {
+    const html = this.layout({
+      heading: '📩 New inquiry on your listing',
+      preheader: `${inquirerName} is interested in "${listingTitle}"`,
+      body:
+        this.p(`Hi ${ownerName}, someone is interested in your listing <strong>${listingTitle}</strong>.`) +
+        `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;margin:20px 0;">
+          <tr><td style="padding:14px 20px;background:#f8fafc;font-weight:600;color:#475569;font-size:13px;">Name</td><td style="padding:14px 20px;color:#0f172a;font-size:14px;">${inquirerName}</td></tr>
+          <tr><td style="padding:14px 20px;background:#f8fafc;font-weight:600;color:#475569;font-size:13px;">Phone</td><td style="padding:14px 20px;color:#0f172a;font-size:14px;font-weight:700;">${phone}</td></tr>
+          ${message ? `<tr><td style="padding:14px 20px;background:#f8fafc;font-weight:600;color:#475569;font-size:13px;">Message</td><td style="padding:14px 20px;color:#0f172a;font-size:14px;">${message}</td></tr>` : ''}
+        </table>` +
+        this.p('Reply directly to their phone or follow up via the app.'),
+    });
+    this.sendEmail({ to, subject: `New inquiry: "${listingTitle}"`, html });
+  }
+
+  /** Marketplace: listing has expired — sent to the listing owner. */
+  static sendListingExpiredEmail(to: string, ownerName: string, listingTitle: string, slug: string): void {
+    const siteUrl = process.env.PUBLIC_SITE_URL || 'https://resismart.in';
+    const html = this.layout({
+      heading: '⏰ Your listing has expired',
+      preheader: `Republish "${listingTitle}" to stay visible`,
+      body:
+        this.p(`Hi ${ownerName}, your listing <strong>${listingTitle}</strong> has expired and is no longer visible to buyers.`) +
+        this.p('Republish it from your dashboard to make it active again. Boosting puts it at the top of results near your location.') +
+        `<p style="margin:24px 0;"><a href="${siteUrl}/marketplace/${slug}" style="display:inline-block;padding:12px 24px;background:${BRAND};color:#fff;border-radius:8px;font-weight:700;text-decoration:none;">View &amp; Republish</a></p>`,
+    });
+    this.sendEmail({ to, subject: `Your listing "${listingTitle}" has expired`, html });
+  }
+
+  /** Marketplace: listing was taken down by a moderator — sent to the listing author. */
+  static sendListingTakenDownEmail(to: string, ownerName: string, listingTitle: string, reason: string): void {
+    const html = this.layout({
+      heading: '🚫 Your listing was removed',
+      preheader: `Action taken on "${listingTitle}"`,
+      body:
+        this.p(`Hi ${ownerName}, your listing <strong>${listingTitle}</strong> has been removed by our moderation team.`) +
+        `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border:1px solid #fecdd3;border-radius:12px;overflow:hidden;margin:20px 0;">
+          <tr><td style="padding:14px 20px;background:#fff1f2;font-weight:600;color:#9f1239;font-size:13px;">Reason</td><td style="padding:14px 20px;color:#0f172a;font-size:14px;">${reason}</td></tr>
+        </table>` +
+        this.p('If you believe this was a mistake, please contact our support team. You can create a new listing that complies with our guidelines.'),
+      accent: '#e11d48',
+    });
+    this.sendEmail({ to, subject: `Your listing "${listingTitle}" was removed`, html });
+  }
 }
 
 export default EmailService;
+

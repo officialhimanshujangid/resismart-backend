@@ -2,6 +2,25 @@ import { z } from 'zod';
 
 const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid id');
 
+/** Honeypot: bots fill this, humans never see it. Reject if non-empty. */
+export const honeypotSchema = z.object({
+  _hp: z.string().max(0, 'Bot detected').optional(),
+});
+
+/** Map viewport pins query. */
+export const mapBboxSchema = z.object({
+  // bbox = minLng,minLat,maxLng,maxLat (comma-separated)
+  bbox: z.string().regex(/^-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*,-?\d+\.?\d*$/, 'bbox must be minLng,minLat,maxLng,maxLat'),
+});
+
+/** Report listing (public, no-auth). */
+export const reportSchema = z.object({
+  listingId: objectId,
+  reason: z.enum(['WRONG_INFO', 'SPAM', 'SCAM', 'INAPPROPRIATE', 'OTHER']),
+  details: z.string().trim().max(500).optional(),
+  _hp: z.string().max(0, 'Bot detected').optional(),
+});
+
 const boostPackageSchema = z.object({
   _id: objectId.optional(), // present for existing packages, absent for new ones
   label: z.string().trim().min(1, 'Package label is required').max(60),
@@ -59,6 +78,10 @@ export const publicBrowseSchema = z.object({
   min: z.coerce.number().min(0).optional(),
   max: z.coerce.number().min(0).optional(),
   bedrooms: z.coerce.number().int().min(0).optional(),
+  furnishing: z.enum(['UNFURNISHED', 'SEMI_FURNISHED', 'FURNISHED']).optional(),
+  sort: z.enum(['relevance', 'price_asc', 'price_desc', 'newest']).optional(),
+  // Cursor = base64(JSON{publishedAt,_id}) for stable keyset pagination; falls back to page.
+  cursor: z.string().optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(12),
 });

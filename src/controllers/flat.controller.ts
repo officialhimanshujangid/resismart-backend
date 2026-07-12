@@ -284,8 +284,13 @@ export const getFlats = async (req: Request, res: Response, next: NextFunction):
       return;
     }
 
-    const { page, pageSize, isPagination, search, status, blockId } = req.query;
+    const { page, pageSize, isPagination, search, status, blockId, myFlatsOnly } = req.query;
     const filter: Record<string, any> = { societyId: new mongoose.Types.ObjectId(societyId) };
+
+    // Flat owner listing flow: only show flats the caller owns
+    if (myFlatsOnly === 'true' && req.user?.userId) {
+      filter.ownerUserId = new mongoose.Types.ObjectId(req.user.userId);
+    }
 
     if (status && ['VACANT', 'OWNER_OCCUPIED', 'RENTED'].includes(String(status))) {
       filter.status = status;

@@ -3,7 +3,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 export type ListingKind = 'SALE' | 'RENT';
 export type ListingScope = 'FLAT' | 'SOCIETY';
 export type ListingStatus = 'DRAFT' | 'ACTIVE' | 'PAUSED' | 'SOLD' | 'RENTED' | 'EXPIRED' | 'TAKEN_DOWN';
-export type VerificationStatus = 'UNVERIFIED' | 'PENDING' | 'VERIFIED' | 'REJECTED';
+export type VerificationStatus = 'UNVERIFIED' | 'PENDING' | 'PENDING_OWNER' | 'VERIFIED' | 'REJECTED';
 
 export interface IListingPhoto {
   url: string;
@@ -107,7 +107,7 @@ const PropertyListingSchema = new Schema<IPropertyListing>({
     revealPhone: { type: Boolean, default: false },
   },
   verification: {
-    status: { type: String, enum: ['UNVERIFIED', 'PENDING', 'VERIFIED', 'REJECTED'], default: 'UNVERIFIED' },
+    status: { type: String, enum: ['UNVERIFIED', 'PENDING', 'PENDING_OWNER', 'VERIFIED', 'REJECTED'], default: 'UNVERIFIED' },
     method: { type: String },
     verifiedAt: { type: Date },
     verifiedBy: { type: Schema.Types.ObjectId, ref: 'User' },

@@ -166,11 +166,39 @@ export async function runExpireBoosts(): Promise<void> {
   }
 }
 
-/** Registers scheduled jobs. Daily subscription jobs at 09:00; boost expiry hourly. */
+/** Expires ACTIVE listings whose expiresAt has passed; emails the listing author. */
+export async function runExpireListings(): Promise<void> {
+  const now = new Date();
+  const due = await PropertyListing.find({ status: 'ACTIVE', expiresAt: { $lte: now } })
+    .select('title slug createdByUserId')
+    .limit(500)
+    .lean();
+
+  if (!due.length) return;
+
+  // Bulk-expire all at once
+  const ids = due.map((l) => l._id);
+  await PropertyListing.updateMany({ _id: { $in: ids } }, { $set: { status: 'EXPIRED' } });
+
+  // Email authors best-effort
+  for (const listing of due) {
+    try {
+      const owner = await User.findById(listing.createdByUserId).select('email name').lean();
+      if (owner?.email) {
+        EmailService.sendListingExpiredEmail(owner.email, owner.name, listing.title, listing.slug);
+      }
+    } catch (_) { /* non-fatal */ }
+  }
+
+  logger.info(`[cron] Expired ${due.length} listing(s)`);
+}
+
+/** Registers scheduled jobs. Daily subscription jobs at 09:00; listing expiry at 09:05; boost expiry hourly. */
 export function startCronJobs(): void {
   cron.schedule('0 9 * * *', runDailyJobs);
+  cron.schedule('5 9 * * *', runExpireListings);
   cron.schedule('0 * * * *', runExpireBoosts);
-  logger.info('[cron] Scheduled daily subscription jobs (09:00) and hourly boost expiry');
+  logger.info('[cron] Scheduled daily subscription jobs (09:00), listing expiry (09:05), and hourly boost expiry');
 }
 
 export default startCronJobs;

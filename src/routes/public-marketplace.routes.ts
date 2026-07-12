@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { browsePublic, detailPublic, similarPublic, createLead } from '../controllers/marketplace-public.controller';
+import {
+  browsePublic, mapPins, detailPublic, similarPublic,
+  createLead, reportListing, sitemapHandler,
+} from '../controllers/marketplace-public.controller';
 
 const router = Router();
 
@@ -14,9 +17,12 @@ const leadLimiter = rateLimit({
   message: { error: 'Too many inquiries from this device. Please try again later.' },
 });
 
+router.get('/sitemap.xml', sitemapHandler);
 router.get('/listings', readLimiter, browsePublic);
+router.get('/listings/map', readLimiter, mapPins);
 router.get('/listings/:id/similar', readLimiter, similarPublic);
 router.get('/listings/:idOrSlug', readLimiter, detailPublic);
 router.post('/leads', leadLimiter, createLead);
+router.post('/reports', leadLimiter, reportListing);
 
 export default router;
