@@ -41,3 +41,20 @@ export const uploadExcel = multer({
     fileSize: 10 * 1024 * 1024, // 10MB limit
   },
 });
+
+// Documents (resident ID proof, rental agreement, police verification): PDF + images.
+const documentFileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+  if (file.mimetype === 'application/pdf' || file.mimetype.startsWith('image/')) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only PDF or image documents are allowed!') as any, false);
+  }
+};
+
+export const uploadDocument = multer({
+  storage,
+  fileFilter: documentFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+});

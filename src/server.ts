@@ -5,6 +5,7 @@ import { logger } from './utils/logger.util';
 import { startCronJobs } from './services/cron.service';
 import { Otp } from './models/otp.model';
 import { User } from './models/user.model';
+import { Resident } from './models/resident.model';
 
 const startServer = async () => {
   // Fail fast if critical secrets are missing (production)
@@ -25,6 +26,10 @@ const startServer = async () => {
     // User email became sparse-unique (was required+unique) to support phone-only
     // login identities — reconcile so null-email identities don't collide.
     await User.syncIndexes();
+    // Resident.userId became optional (data-only household members) — the old plain
+    // unique {flatId,userId} index is replaced by a PARTIAL unique index (userId present
+    // only), so data-only rows with no userId don't collide on null.
+    await Resident.syncIndexes();
   } catch (err: any) {
     logger.warn(`[startup] syncIndexes failed: ${err.message}`);
   }

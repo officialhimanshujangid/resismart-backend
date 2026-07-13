@@ -50,6 +50,19 @@ import {
   updateTenure,
   deleteTenure,
 } from '../controllers/flat-lifecycle.controller';
+import {
+  getHousehold,
+  getFlatEvents,
+  addHouseholdMember,
+  updateHouseholdMember,
+  setHouseholdHead,
+  removeHouseholdMember,
+  addHouseholdDocument,
+  downloadHouseholdDocument,
+  getTenancy,
+  addTenancyDocument,
+  downloadTenancyDocument,
+} from '../controllers/household.controller';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
 import { enforceLimit } from '../middlewares/subscription.guard';
 import { uploadExcel } from '../middlewares/upload.middleware';
@@ -114,6 +127,22 @@ router.get('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, get
 router.post('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), addResident);
 router.put('/residents/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), updateResident);
 router.delete('/residents/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), removeResident);
+
+// --- Household management (owner/admin-managed members, immediate; timeline events) ---
+const HOUSEHOLD_ROLES = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER];
+router.get('/flats/:flatId/household', authenticateJWT, enforceTenantAccess, getHousehold);
+router.get('/flats/:flatId/events', authenticateJWT, enforceTenantAccess, getFlatEvents);
+router.post('/flats/:flatId/household', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), addHouseholdMember);
+router.put('/household/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), updateHouseholdMember);
+router.post('/household/:residentId/set-head', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), setHouseholdHead);
+router.post('/household/:residentId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), addHouseholdDocument);
+router.get('/household/:residentId/documents/:docId/download', authenticateJWT, enforceTenantAccess, downloadHouseholdDocument);
+router.delete('/household/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), removeHouseholdMember);
+
+// --- Tenancy (current tenant household + tenancy documents) ---
+router.get('/flats/:flatId/tenancy', authenticateJWT, enforceTenantAccess, getTenancy);
+router.post('/flats/:flatId/tenancy/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), addTenancyDocument);
+router.get('/flats/:flatId/tenancy/documents/:docId/download', authenticateJWT, enforceTenantAccess, downloadTenancyDocument);
 
 // --- Resident registration requests (two-way approval) ---
 router.post(

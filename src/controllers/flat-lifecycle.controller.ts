@@ -62,13 +62,14 @@ export const rentOutFlat = (req: Request, res: Response, next: NextFunction) =>
   runTransition(req, res, next, async (flat, session, actor) => {
     const d = rentOutSchema.parse(req.body);
     const out = await lifecycle.rentOut(String(flat._id), String(flat.societyId), {
-      tenant: d.tenant,
-      occupants: d.occupants,
+      tenants: d.tenants,
       rentAmountPaise: toPaise(d.rentAmount)!,
       securityDepositPaise: toPaise(d.securityDeposit)!,
       startDate: d.startDate, endDate: d.endDate,
+      documents: d.documents,
     }, actor, session);
-    logLifecycle(req, 'FLAT_RENT_OUT', String(flat._id), { tenant: d.tenant.name, rentAmount: d.rentAmount });
+    const headName = (d.tenants.find((t) => t.isHead) || d.tenants[0]).name;
+    logLifecycle(req, 'FLAT_RENT_OUT', String(flat._id), { tenant: headName, household: d.tenants.length, rentAmount: d.rentAmount });
     return { message: 'Flat rented out', tenureId: out.tenure._id };
   });
 

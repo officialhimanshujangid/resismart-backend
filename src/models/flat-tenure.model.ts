@@ -10,6 +10,16 @@ export interface ITenureOccupant {
   relationship: string; // OWNER | SPOUSE | CHILD | PARENT | TENANT | OTHER
 }
 
+/** A document attached to a tenure — rental agreement, tenant KYC, police verification. */
+export interface ITenureDocument {
+  kind: string;
+  label: string;
+  key: string; // private S3 object key
+  url: string;
+  uploadedAt: Date;
+  uploadedByName: string;
+}
+
 /**
  * One period in a flat's history: who owned it or occupied it, from when to when.
  * The append-only sequence of tenures IS the flat timeline
@@ -33,6 +43,7 @@ export interface IFlatTenure extends Document {
   rentAmountPaise?: number;
   securityDepositPaise?: number;
   rentalAgreementId?: mongoose.Types.ObjectId;
+  documents: ITenureDocument[];
   notes?: string;
 
   // Audit columns
@@ -49,6 +60,15 @@ const OccupantSchema = new Schema<ITenureOccupant>({
   name: { type: String, required: true, trim: true },
   relationship: { type: String, enum: ['OWNER', 'SPOUSE', 'CHILD', 'PARENT', 'TENANT', 'OTHER'], default: 'OTHER' },
 }, { _id: false });
+
+const TenureDocumentSchema = new Schema<ITenureDocument>({
+  kind: { type: String, default: 'OTHER', trim: true },
+  label: { type: String, required: true, trim: true },
+  key: { type: String, required: true },
+  url: { type: String, required: true },
+  uploadedAt: { type: Date, default: Date.now },
+  uploadedByName: { type: String, default: '' },
+}, { _id: true });
 
 const FlatTenureSchema = new Schema<IFlatTenure>({
   flatId: { type: Schema.Types.ObjectId, ref: 'Flat', required: true },
@@ -67,6 +87,7 @@ const FlatTenureSchema = new Schema<IFlatTenure>({
   rentAmountPaise: { type: Number, min: 0 },
   securityDepositPaise: { type: Number, min: 0 },
   rentalAgreementId: { type: Schema.Types.ObjectId, ref: 'RentalAgreement' },
+  documents: { type: [TenureDocumentSchema], default: [] },
   notes: { type: String, trim: true },
 
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },

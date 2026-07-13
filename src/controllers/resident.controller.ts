@@ -83,6 +83,7 @@ export const addResident = async (req: Request, res: Response, next: NextFunctio
         flatId: flat._id,
         societyId: new mongoose.Types.ObjectId(societyId),
         userId: uid,
+        person: { name: validatedData.name, email, phone: validatedData.phone },
         relationship: validatedData.relationship,
         isOwner: false,
         isActive: true,
