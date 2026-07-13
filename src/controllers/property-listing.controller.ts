@@ -102,11 +102,38 @@ export const getMyListings = async (req: Request, res: Response, next: NextFunct
     if (!userId || !societyId) { res.status(401).json({ error: 'Missing tenant or user details' }); return; }
 
     const { page, pageSize, isPagination, status, search } = req.query;
-    const filter: Record<string, any> = { societyId: new mongoose.Types.ObjectId(societyId) };
-    // Admins see all society listings; residents see only their own.
-    if (!isAdmin(role)) filter.createdByUserId = new mongoose.Types.ObjectId(userId);
+    const uid = new mongoose.Types.ObjectId(userId);
+    const societyOid = new mongoose.Types.ObjectId(societyId);
+
+    // Flats this user actually owns in the active society. A listing awaiting owner
+    // approval (PENDING_OWNER) is, by construction, admin-posted for a flat the creator
+    // does NOT own — so only the real flat owner may approve it. We need this set both to
+    // surface those listings to the rightful owner and to compute `canApprove`.
+    const ownedFlats = await Flat.find({
+      societyId: societyOid,
+      $or: [{ ownerUserId: uid }, { owners: uid }],
+    }).select('_id').lean();
+    const ownedFlatIds = ownedFlats.map((f: any) => f._id);
+
+    const filter: Record<string, any> = { societyId: societyOid };
+    // Admins see all society listings. Residents see listings they created OR listings
+    // posted for a flat they own (the owner-approval queue) — previously an admin-posted
+    // listing for someone else's flat leaked into the creator's approval queue while the
+    // rightful owner never saw it at all.
+    if (!isAdmin(role)) {
+      filter.$or = [{ createdByUserId: uid }, { flatId: { $in: ownedFlatIds } }];
+    }
     if (status && typeof status === 'string') filter.status = status;
     if (search && typeof search === 'string') filter.title = { $regex: search, $options: 'i' };
+
+    const ownedSet = new Set(ownedFlatIds.map((id: any) => id.toString()));
+    // A user may approve a listing iff it is awaiting owner approval AND it is for a flat
+    // they own — exactly the condition approveVerification enforces. This lets the client
+    // show the approval CTA only where it will actually succeed.
+    const annotate = (l: any) => ({
+      ...l,
+      canApprove: l.verification?.status === 'PENDING_OWNER' && !!l.flatId && ownedSet.has(l.flatId.toString()),
+    });
 
     if (isPagination === 'true') {
       const currentPage = Math.max(1, parseInt(String(page || '1'), 10));
@@ -116,11 +143,11 @@ export const getMyListings = async (req: Request, res: Response, next: NextFunct
         PropertyListing.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(limit).lean(),
         PropertyListing.countDocuments(filter),
       ]);
-      res.status(200).json({ listings, pagination: { total, page: currentPage, pageSize: limit, totalPages: Math.ceil(total / limit) } });
+      res.status(200).json({ listings: listings.map(annotate), pagination: { total, page: currentPage, pageSize: limit, totalPages: Math.ceil(total / limit) } });
       return;
     }
     const listings = await PropertyListing.find(filter).sort({ updatedAt: -1 }).lean();
-    res.status(200).json({ listings });
+    res.status(200).json({ listings: listings.map(annotate) });
   } catch (error) {
     next(error);
   }

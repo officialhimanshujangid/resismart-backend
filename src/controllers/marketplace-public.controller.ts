@@ -44,6 +44,21 @@ const maskPhone = (phone?: string | null): string | null => {
   return '•'.repeat(Math.max(4, digits.length - 3)) + last3;
 };
 
+/**
+ * Strip the raw owner phone from a public listing payload, replacing it with a masked
+ * hint. The full number is only ever revealed after a visitor submits the contact form
+ * (see `createLead`). MUST be applied to every endpoint that returns `PUBLIC_DETAIL`.
+ */
+const maskListingContact = (listing: any): any => {
+  const rawPhone = listing?.contact?.phone as string | undefined;
+  if (listing?.contact) {
+    listing.contact.phoneMasked = maskPhone(rawPhone);
+    listing.contact.hasPhone = !!rawPhone;
+    delete listing.contact.phone;
+  }
+  return listing;
+};
+
 // ── Cursor (keyset pagination) helpers ────────────────────────────────────────
 
 const encodeCursor = (page: number) => page.toString();
@@ -178,12 +193,7 @@ export const detailPublic = async (req: Request, res: Response, next: NextFuncti
 
     // Never leak the raw owner number — expose only a masked hint (last 3 digits).
     // The full number is revealed only after the visitor submits the contact form.
-    const rawPhone = (listing as any).contact?.phone as string | undefined;
-    if ((listing as any).contact) {
-      (listing as any).contact.phoneMasked = maskPhone(rawPhone);
-      (listing as any).contact.hasPhone = !!rawPhone;
-      delete (listing as any).contact.phone;
-    }
+    maskListingContact(listing);
 
     // Bump view counter fire-and-forget (non-blocking)
     PropertyListing.updateOne({ _id: listing._id }, { $inc: { viewsCount: 1 } }).catch(() => null);
@@ -207,6 +217,8 @@ export const comparePublic = async (req: Request, res: Response, next: NextFunct
     const ids = String(req.query.ids || '').split(',').map((s) => s.trim()).filter((s) => mongoose.Types.ObjectId.isValid(s)).slice(0, 4);
     if (!ids.length) { res.status(200).json({ listings: [] }); return; }
     const listings = await PropertyListing.find({ _id: { $in: ids } }).select(PUBLIC_DETAIL).lean();
+    // Never leak raw owner numbers to anonymous callers — same masking as detailPublic.
+    listings.forEach(maskListingContact);
     setPublicCache(res, 60, 300);
     res.status(200).json({ listings });
   } catch (error) {
