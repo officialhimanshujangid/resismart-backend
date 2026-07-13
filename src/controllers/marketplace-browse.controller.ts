@@ -34,7 +34,8 @@ export const browseListings = async (req: Request, res: Response, next: NextFunc
 
     await lazyExpireBoosts();
     const setting = await getAdSetting();
-    const maxMeters = Math.round((setting.maxRadiusKm || 50) * 1000);
+    const maxAllowedMeters = Math.round((setting.maxRadiusKm || 50) * 1000);
+    const maxMeters = Math.min(maxAllowedMeters, Math.round(q.radiusKm * 1000));
 
     const match: Record<string, any> = { status: 'ACTIVE' };
     if (q.kind) match.kind = q.kind;
@@ -49,7 +50,7 @@ export const browseListings = async (req: Request, res: Response, next: NextFunc
     const rows = await PropertyListing.aggregate([
       { $geoNear: { near: { type: 'Point', coordinates: coords as [number, number] }, distanceField: 'distance', maxDistance: maxMeters, spherical: true, query: match } },
       { $match: { $expr: { $lte: ['$distance', '$effectiveRadiusMeters'] } } },
-      { $sort: { 'boost.topPlacement': -1, distance: 1, publishedAt: -1 } },
+      { $sort: { 'boost.topPlacement': -1, 'boost.startAt': -1, distance: 1, publishedAt: -1 } },
       { $skip: skip },
       { $limit: q.pageSize + 1 },
       { $project: CARD_PROJECTION },

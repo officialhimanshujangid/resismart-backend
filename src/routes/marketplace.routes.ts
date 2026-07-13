@@ -7,10 +7,10 @@ import {
 } from '../controllers/property-listing.controller';
 import { checkoutBoost, verifyBoost, getBoostStatus, getBoostPackages } from '../controllers/listing-boost.controller';
 import { browseListings, browseListingDetail } from '../controllers/marketplace-browse.controller';
-import { getRevenueStats, getBoostLedger, getAllListings, takedownListing, getReports, dismissReport } from '../controllers/marketplace-owner.controller';
+import { getRevenueStats, getBoostLedger, getAllListings, takedownListing, getReports, dismissReport, getAllLeads } from '../controllers/marketplace-owner.controller';
 import {
   toggleFavorite, listFavorites, getFavoriteIds, compareListings,
-  createSavedSearch, listSavedSearches, updateSavedSearch, deleteSavedSearch, getListingLeads,
+  createSavedSearch, listSavedSearches, updateSavedSearch, deleteSavedSearch, getListingLeads, getMyLeads,
 } from '../controllers/marketplace-engage.controller';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
 import { enforceLimit } from '../middlewares/subscription.guard';
@@ -80,6 +80,7 @@ router.get('/saved-searches', authenticateJWT, listSavedSearches);
 router.post('/saved-searches', authenticateJWT, createSavedSearch);
 router.patch('/saved-searches/:id', authenticateJWT, updateSavedSearch);
 router.delete('/saved-searches/:id', authenticateJWT, deleteSavedSearch);
+router.get('/my-leads', authenticateJWT, enforceTenantAccess, authorizeRoles(AUTHOR_ROLES), getMyLeads);
 router.get('/listings/:id/leads', authenticateJWT, enforceTenantAccess, authorizeRoles(AUTHOR_ROLES), getListingLeads);
 
 // ── SYSTEM_OWNER: revenue + moderation ──
@@ -90,5 +91,6 @@ router.get('/owner/listings', authenticateJWT, authorizeRoles(OWNER), getAllList
 router.post('/owner/listings/:id/takedown', authenticateJWT, authorizeRoles(OWNER), takedownListing);
 router.get('/owner/reports', authenticateJWT, authorizeRoles(OWNER), getReports);
 router.post('/owner/reports/:id/dismiss', authenticateJWT, authorizeRoles(OWNER), dismissReport);
+router.get('/owner/leads', authenticateJWT, authorizeRoles(OWNER), getAllLeads);
 
 export default router;

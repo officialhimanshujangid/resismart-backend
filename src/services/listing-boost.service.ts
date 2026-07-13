@@ -34,7 +34,7 @@ export const applyBoostToListing = async (boost: IListingBoost, paymentId?: stri
     packageLabel: snap.label,
     radiusKm: snap.radiusKm,
     topPlacement: snap.topPlacement,
-    startAt: listing.boost?.startAt || now,
+    startAt: now,
     endAt,
   } as any;
   listing.effectiveRadiusMeters = Math.round(snap.radiusKm * 1000);

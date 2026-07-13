@@ -26,8 +26,9 @@ const canManage = (req: Request, listing: any): boolean =>
 const resolveVerification = (scope: string, flat: any, role?: UserRole, userId?: string) => {
   // Society-level ad created by admin → always verified (the society is the author)
   if (scope === 'SOCIETY' && isAdmin(role)) return { status: 'VERIFIED' as const, method: 'SOCIETY_ADMIN', verifiedAt: new Date() };
+  const isOwner = flat?.ownerUserId?.toString() === userId || flat?.owners?.some((id: any) => id.toString() === userId);
   // Flat-level ad created by the flat's registered owner → auto-verified by ownership match
-  if (scope === 'FLAT' && flat?.ownerUserId && flat.ownerUserId.toString() === userId) {
+  if (scope === 'FLAT' && isOwner) {
     return { status: 'VERIFIED' as const, method: 'OWNER_MATCH', verifiedAt: new Date() };
   }
   // Flat-level ad created by an ADMIN on behalf of a flat → PENDING_OWNER (flat owner must approve)
@@ -50,7 +51,8 @@ export const createListing = async (req: Request, res: Response, next: NextFunct
     if (d.scope === 'FLAT') {
       flat = await Flat.findOne({ _id: d.flatId, societyId: new mongoose.Types.ObjectId(societyId) });
       if (!flat) { res.status(404).json({ error: 'Flat not found' }); return; }
-      if (role === UserRole.RESIDENT_OWNER && (!flat.ownerUserId || flat.ownerUserId.toString() !== userId)) {
+      const isOwner = flat.ownerUserId?.toString() === userId || flat.owners?.some((id: any) => id.toString() === userId);
+      if (role === UserRole.RESIDENT_OWNER && !isOwner) {
         res.status(403).json({ error: 'You can only advertise a flat you own' }); return;
       }
     }
@@ -272,8 +274,9 @@ export const approveVerification = async (req: Request, res: Response, next: Nex
     if (!listing.flatId) { res.status(400).json({ error: 'Listing has no associated flat' }); return; }
 
     // Verify the caller is the registered owner of the flat
-    const flat = await Flat.findOne({ _id: listing.flatId, societyId: new mongoose.Types.ObjectId(societyId) }).select('ownerUserId').lean();
-    if (!flat || flat.ownerUserId?.toString() !== userId) {
+    const flat = await Flat.findOne({ _id: listing.flatId, societyId: new mongoose.Types.ObjectId(societyId) }).select('ownerUserId owners').lean();
+    const isOwner = flat && (flat.ownerUserId?.toString() === userId || flat.owners?.some((id: any) => id.toString() === userId));
+    if (!isOwner) {
       res.status(403).json({ error: 'Only the flat owner can approve this listing' }); return;
     }
 
@@ -310,8 +313,9 @@ export const rejectVerification = async (req: Request, res: Response, next: Next
     }
     if (!listing.flatId) { res.status(400).json({ error: 'Listing has no associated flat' }); return; }
 
-    const flat = await Flat.findOne({ _id: listing.flatId, societyId: new mongoose.Types.ObjectId(societyId) }).select('ownerUserId').lean();
-    if (!flat || flat.ownerUserId?.toString() !== userId) {
+    const flat = await Flat.findOne({ _id: listing.flatId, societyId: new mongoose.Types.ObjectId(societyId) }).select('ownerUserId owners').lean();
+    const isOwner = flat && (flat.ownerUserId?.toString() === userId || flat.owners?.some((id: any) => id.toString() === userId));
+    if (!isOwner) {
       res.status(403).json({ error: 'Only the flat owner can reject this listing' }); return;
     }
 

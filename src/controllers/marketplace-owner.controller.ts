@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { ListingBoost } from '../models/listing-boost.model';
 import { PropertyListing } from '../models/property-listing.model';
 import { ListingReport } from '../models/listing-report.model';
+import { ListingLead } from '../models/listing-lead.model';
 import { Society } from '../models/society.model';
 import { User } from '../models/user.model';
 import { AuditService } from '../services/audit.service';
@@ -163,6 +164,47 @@ export const dismissReport = async (req: Request, res: Response, next: NextFunct
     report.reviewedAt = new Date();
     await report.save();
     res.status(200).json({ message: 'Report dismissed', report });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * SYSTEM_OWNER: platform-wide "ad admin" inbox of every contact-form submission
+ * (people who requested a callback / viewed a number), across all societies. Paginated,
+ * searchable by enquirer name/phone, filterable by source.
+ */
+export const getAllLeads = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { page, pageSize, search, source } = req.query;
+    const filter: Record<string, any> = {};
+    if (source && (source === 'PUBLIC' || source === 'IN_APP')) filter.source = source;
+    if (search && typeof search === 'string' && search.trim()) {
+      const rx = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ 'from.name': rx }, { 'from.phone': rx }];
+    }
+
+    const currentPage = Math.max(1, parseInt(String(page || '1'), 10));
+    const limit = Math.min(100, Math.max(1, parseInt(String(pageSize || '20'), 10)));
+    const skip = (currentPage - 1) * limit;
+
+    const [rows, total, todayCount] = await Promise.all([
+      ListingLead.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('listingId', 'title kind slug city pricePaise contact')
+        .populate('societyId', 'name city')
+        .lean(),
+      ListingLead.countDocuments(filter),
+      ListingLead.countDocuments({ createdAt: { $gte: new Date(Date.now() - 86400000) } }),
+    ]);
+
+    res.status(200).json({
+      leads: rows,
+      stats: { total, last24h: todayCount },
+      pagination: { total, page: currentPage, pageSize: limit, totalPages: Math.ceil(total / limit) },
+    });
   } catch (error) {
     next(error);
   }

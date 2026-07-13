@@ -11,6 +11,7 @@ export interface IListingLead extends Document {
   from: { userId?: mongoose.Types.ObjectId; name: string; phone: string; phoneVerified: boolean };
   message?: string;
   source: 'PUBLIC' | 'IN_APP';
+  viewerIp?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -26,10 +27,12 @@ const ListingLeadSchema = new Schema<IListingLead>({
   },
   message: { type: String, trim: true, maxlength: 1000 },
   source: { type: String, enum: ['PUBLIC', 'IN_APP'], default: 'PUBLIC' },
+  viewerIp: { type: String },
 }, { timestamps: true });
 
 ListingLeadSchema.index({ listingId: 1, createdAt: -1 });
-ListingLeadSchema.index({ societyId: 1 });
+ListingLeadSchema.index({ societyId: 1, createdAt: -1 });
+ListingLeadSchema.index({ createdAt: -1 }); // platform-wide admin inbox
 ListingLeadSchema.index({ 'from.phone': 1 });
 
 export const ListingLead = mongoose.model<IListingLead>('ListingLead', ListingLeadSchema);

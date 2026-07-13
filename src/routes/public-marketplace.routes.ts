@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import {
-  browsePublic, mapPins, detailPublic, similarPublic,
-  createLead, reportListing, sitemapHandler,
+  browsePublic, mapPins, detailPublic, similarPublic, comparePublic,
+  createLead, reportListing, sitemapHandler, cityAutocomplete,
 } from '../controllers/marketplace-public.controller';
 
 const router = Router();
@@ -18,9 +18,11 @@ const leadLimiter = rateLimit({
 });
 
 router.get('/sitemap.xml', sitemapHandler);
+router.get('/cities', readLimiter, cityAutocomplete);
 router.get('/listings', readLimiter, browsePublic);
 router.get('/listings/map', readLimiter, mapPins);
 router.get('/listings/:id/similar', readLimiter, similarPublic);
+router.get('/compare', readLimiter, comparePublic);
 router.get('/listings/:idOrSlug', readLimiter, detailPublic);
 router.post('/leads', leadLimiter, createLead);
 router.post('/reports', leadLimiter, reportListing);

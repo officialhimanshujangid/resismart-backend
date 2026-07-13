@@ -142,7 +142,7 @@ const PropertyListingSchema = new Schema<IPropertyListing>({
 });
 
 PropertyListingSchema.index({ location: '2dsphere' });
-PropertyListingSchema.index({ status: 1, 'boost.topPlacement': -1, publishedAt: -1 });
+PropertyListingSchema.index({ status: 1, 'boost.topPlacement': -1, 'boost.startAt': -1, publishedAt: -1 });
 PropertyListingSchema.index({ societyId: 1 });
 PropertyListingSchema.index({ flatId: 1 });
 PropertyListingSchema.index({ createdByUserId: 1 });

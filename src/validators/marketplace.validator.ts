@@ -72,6 +72,7 @@ export const boostVerifySchema = z.object({
 export const publicBrowseSchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional(),
   lat: z.coerce.number().min(-90).max(90).optional(),
+  radiusKm: z.coerce.number().min(1).max(500).default(50),
   city: z.string().trim().max(80).optional(),
   pincode: z.string().trim().max(12).optional(),
   kind: z.enum(['SALE', 'RENT']).optional(),
@@ -86,12 +87,24 @@ export const publicBrowseSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(12),
 });
 
+/**
+ * Public lead / "view number" form. No sign-in or OTP — the visitor just leaves a name
+ * and phone to reveal the owner's contact; the submission itself becomes the owner's
+ * "who viewed my number" record. Anti-spam is handled by the honeypot + rate limiters.
+ */
 export const leadSchema = z.object({
   listingId: objectId,
   name: z.string().trim().min(1, 'Name is required').max(120),
-  phone: z.string().trim().min(6, 'A valid phone is required').max(20),
+  phone: z.string().trim().min(6, 'A valid phone is required').max(20)
+    .regex(/^[+\d][\d\s-]{5,19}$/, 'Enter a valid phone number'),
   message: z.string().trim().max(1000).optional(),
-  otpToken: z.string().min(1, 'Verify your phone number first'),
+  _hp: z.string().max(0, 'Bot detected').optional(),
+});
+
+/** City autocomplete query. */
+export const citySuggestSchema = z.object({
+  q: z.string().trim().max(80).optional(),
+  limit: z.coerce.number().int().min(1).max(20).default(8),
 });
 
 export const savedSearchSchema = z.object({
@@ -111,6 +124,7 @@ export const savedSearchSchema = z.object({
 export const browseQuerySchema = z.object({
   lng: z.coerce.number().min(-180).max(180).optional(),
   lat: z.coerce.number().min(-90).max(90).optional(),
+  radiusKm: z.coerce.number().min(1).max(500).default(50),
   kind: z.enum(['SALE', 'RENT']).optional(),
   min: z.coerce.number().min(0).optional(),   // rupees
   max: z.coerce.number().min(0).optional(),   // rupees

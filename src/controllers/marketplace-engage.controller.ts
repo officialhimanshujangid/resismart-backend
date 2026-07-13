@@ -130,6 +130,51 @@ export const deleteSavedSearch = async (req: Request, res: Response, next: NextF
   }
 };
 
+/**
+ * Aggregated "who viewed my number" inbox for a listing author. Society admins/committee
+ * see every lead in their society; a resident owner sees only leads on listings they created.
+ * Paginated + searchable by enquirer name/phone.
+ */
+export const getMyLeads = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const userId = req.user?.userId, societyId = req.user?.activeTenantId, role = req.user?.activeRole;
+    if (!userId || !societyId) { res.status(401).json({ error: 'Missing tenant or user details' }); return; }
+    const isAdmin = role === UserRole.SOCIETY_ADMIN || role === UserRole.SOCIETY_COMMITTEE;
+
+    // Scope the leads to the listings this user is allowed to see.
+    const listingFilter: Record<string, any> = { societyId: new mongoose.Types.ObjectId(societyId) };
+    if (!isAdmin) listingFilter.createdByUserId = new mongoose.Types.ObjectId(userId);
+    const listingIds = await PropertyListing.find(listingFilter).select('_id').lean();
+    const ids = listingIds.map((l) => l._id);
+
+    const { page, pageSize, search } = req.query;
+    const filter: Record<string, any> = { listingId: { $in: ids } };
+    if (search && typeof search === 'string' && search.trim()) {
+      const rx = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ 'from.name': rx }, { 'from.phone': rx }];
+    }
+
+    const currentPage = Math.max(1, parseInt(String(page || '1'), 10));
+    const limit = Math.min(100, Math.max(1, parseInt(String(pageSize || '20'), 10)));
+    const skip = (currentPage - 1) * limit;
+
+    const [rows, total, last7d] = await Promise.all([
+      ListingLead.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)
+        .populate('listingId', 'title kind slug city pricePaise').lean(),
+      ListingLead.countDocuments(filter),
+      ListingLead.countDocuments({ ...filter, createdAt: { $gte: new Date(Date.now() - 7 * 86400000) } }),
+    ]);
+
+    res.status(200).json({
+      leads: rows,
+      stats: { total, last7d, listings: ids.length },
+      pagination: { total, page: currentPage, pageSize: limit, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // ── Author lead inbox ──
 export const getListingLeads = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
