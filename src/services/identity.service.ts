@@ -12,6 +12,8 @@ import mongoose from 'mongoose';
 import { User, IUser } from '../models/user.model';
 import { normalizePhone, isEmail } from '../utils/phone.util';
 import { TenantType, UserRole } from '../constants/roles';
+import crypto from 'crypto';
+import { hashPassword } from '../utils/hash.util';
 
 export interface AttachArgs {
   email?: string;
@@ -26,6 +28,7 @@ export interface AttachArgs {
 export interface AttachResult {
   emailUser?: IUser;
   phoneUser?: IUser;
+  generatedPassword?: string;
 }
 
 const addMembership = (
@@ -61,7 +64,12 @@ export const attachTenantMembership = async (
   if (args.email && isEmail(args.email)) {
     const email = args.email.toLowerCase().trim();
     let u = await findOne({ email }, session);
-    if (!u) u = new User({ email, name: args.name, isActive, memberships: [] });
+    if (!u) {
+      const plainPassword = crypto.randomBytes(4).toString('hex');
+      const passwordHash = await hashPassword(plainPassword);
+      u = new User({ email, name: args.name, isActive, memberships: [], passwordHash });
+      out.generatedPassword = plainPassword;
+    }
     if (isActive) u.isActive = true;
     addMembership(u, args.tenantType, tenantId, args.role);
     await u.save(session ? { session } : {});

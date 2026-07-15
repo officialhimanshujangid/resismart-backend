@@ -273,16 +273,20 @@ class EmailService {
    * Passwordless access notice — sent when a tenant identity (society admin,
    * flat owner, shop admin) is provisioned. No password: they log in with a
    * one-time code sent to their email or phone.
+   * If generatedPassword is provided, a password has been generated for them.
    */
-  static sendTenantAccessEmail(toEmail: string, entityName: string, kind: 'society' | 'flat' | 'shop', extraRows: Array<[string, string]> = []): void {
+  static sendTenantAccessEmail(toEmail: string, entityName: string, kind: 'society' | 'flat' | 'shop', extraRows: Array<[string, string]> = [], generatedPassword?: string): void {
     const loginLink = `${appConfig.frontendUrl}/login`;
     const noun = kind === 'flat' ? 'flat/plot' : kind;
     const html = this.layout({
       heading: `You have access to your ${noun} 🎉`,
       accent: '#16a34a',
       body: this.p(`Your ${noun} <strong>${entityName}</strong> is ready in ${appConfig.appName}.`) +
-        this.infoBox([[kind === 'shop' ? 'Shop' : kind === 'flat' ? 'Flat/Plot' : 'Society', entityName], ['Sign-in', toEmail], ...extraRows]) +
-        this.p(`No password needed — just log in with your <strong>email or phone number</strong> and we'll send a one-time code to verify it.`) +
+        this.infoBox([[kind === 'shop' ? 'Shop' : kind === 'flat' ? 'Flat/Plot' : 'Society', entityName], ['Sign-in', toEmail], ...extraRows, ...(generatedPassword ? [['Password', generatedPassword] as [string, string]] : [])]) +
+        (generatedPassword 
+            ? this.p(`You have been assigned a temporary password. Please log in using your email and password, and we recommend changing it immediately.`)
+            : this.p(`No password needed — just log in with your <strong>email or phone number</strong> and we'll send a one-time code to verify it.`)
+        ) +
         this.button('Log in', loginLink),
     });
     this.sendEmail({ to: toEmail, subject: `Access ready — ${entityName} — ${appConfig.appName}`, html });

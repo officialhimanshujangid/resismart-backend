@@ -22,7 +22,11 @@ export interface IFlat extends Document {
   };
   
   size?: mongoose.Types.ObjectId; // Ref to FlatSize
-  
+
+  // Area for per-sq-ft billing (finance). Optional; only needed for PER_SQFT charge heads.
+  carpetAreaSqft?: number;
+  builtUpAreaSqft?: number;
+
   ownerUserId?: mongoose.Types.ObjectId; // User with UserRole.RESIDENT_OWNER (Head of flat)
   owners: mongoose.Types.ObjectId[]; // Legacy/Backward compat
   residents: mongoose.Types.ObjectId[]; // Refs to Resident model
@@ -80,6 +84,8 @@ const FlatSchema = new Schema<IFlat>({
     type: Schema.Types.ObjectId,
     ref: 'FlatSize',
   },
+  carpetAreaSqft: { type: Number, min: 0 },
+  builtUpAreaSqft: { type: Number, min: 0 },
   ownerUserId: {
     type: Schema.Types.ObjectId,
     ref: 'User',

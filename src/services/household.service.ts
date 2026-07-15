@@ -104,7 +104,7 @@ const roleForRelationship = (relationship: string): UserRole =>
  * contact must be OTP-verified). Throws 400 if a contact is present but not verified.
  * Returns which contacts were verified so callers can consume + stamp them.
  */
-const verifyContacts = async (
+export const verifyContacts = async (
   person: PersonContact,
   tokens: { emailToken?: string; phoneToken?: string },
 ) => {
@@ -122,7 +122,7 @@ const verifyContacts = async (
   return out;
 };
 
-const consumeContacts = async (person: PersonContact, verified: { emailVerified?: boolean; phoneVerified?: boolean }) => {
+export const consumeContacts = async (person: PersonContact, verified: { emailVerified?: boolean; phoneVerified?: boolean }) => {
   if (verified.emailVerified && person.email) await consumeVerification('EMAIL', person.email, 'FLAT_REGISTRATION');
   if (verified.phoneVerified && person.phone) await consumeVerification('PHONE', person.phone, 'FLAT_REGISTRATION');
 };
@@ -195,12 +195,14 @@ export const addMember = async (input: AddMemberInput, actor: Actor, session: mo
 
   const createdResidentIds: mongoose.Types.ObjectId[] = [];
   const identityIds: mongoose.Types.ObjectId[] = [];
+  let generatedPassword: string | undefined;
 
   if (hasContact) {
     const identities = await attachTenantMembership({
       email: input.person.email, phone: input.person.phone, name: input.person.name,
       tenantType: TenantType.SOCIETY, tenantId: sId, role,
     }, session);
+    generatedPassword = identities.generatedPassword;
     const ids = [identities.emailUser?._id, identities.phoneUser?._id].filter(Boolean) as mongoose.Types.ObjectId[];
     identityIds.push(...ids);
 
@@ -260,7 +262,7 @@ export const addMember = async (input: AddMemberInput, actor: Actor, session: mo
   if (hasContact) {
     // Access notification (passwordless) — reuse the existing branded email.
     if (input.person.email && isEmail(input.person.email)) {
-      EmailService.sendTenantAccessEmail(input.person.email, flatLabel(flat), 'flat', [['Role', relationship]]);
+      EmailService.sendTenantAccessEmail(input.person.email, flatLabel(flat), 'flat', [['Role', relationship]], generatedPassword);
     }
     await logFlatEvent({
       flatId: fId, societyId: sId, type: 'ACCESS_GRANTED', actor,
@@ -360,7 +362,7 @@ export const updateMember = async (residentId: string, input: UpdateMemberInput,
     }
     grantedAccess = true;
     if (input.addEmail && isEmail(input.addEmail)) {
-      EmailService.sendTenantAccessEmail(input.addEmail, flatLabel(flat), 'flat', [['Role', newRelationship]]);
+      EmailService.sendTenantAccessEmail(input.addEmail, flatLabel(flat), 'flat', [['Role', newRelationship]], identities.generatedPassword);
     }
     await consumeContacts(person, verified);
   }

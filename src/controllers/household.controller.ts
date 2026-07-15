@@ -13,8 +13,13 @@ import { TenantType, UserRole } from '../constants/roles';
 /** Society admins/committee manage any flat; a flat owner manages only their own flat. */
 const assertManageAccess = (req: Request, flat: any): string | null => {
   const role = req.user?.activeRole;
-  if (role === UserRole.SOCIETY_ADMIN || role === UserRole.SOCIETY_COMMITTEE) return null;
+  // Owner can manage their own flat
   if (role === UserRole.RESIDENT_OWNER && flat.ownerUserId && flat.ownerUserId.toString() === req.user?.userId) return null;
+  
+  // Society admins cannot add household members, set heads, or manage tenancy docs
+  if (role === UserRole.SOCIETY_ADMIN || role === UserRole.SOCIETY_COMMITTEE) {
+    return 'Society admins cannot manage flat household members or tenancy. Only the owner can.';
+  }
   return 'You are not allowed to manage this flat';
 };
 

@@ -10,10 +10,16 @@ import { TenantType, UserRole } from '../constants/roles';
 const toPaise = (rupees?: number) => (rupees === undefined ? undefined : Math.round(rupees * 100));
 
 /** Society admins/committee manage any flat; a flat owner manages only their own flat. */
-const assertManageAccess = (req: Request, flat: any): string | null => {
+const assertManageAccess = (req: Request, flat: any, action: string): string | null => {
   const role = req.user?.activeRole;
-  if (role === UserRole.SOCIETY_ADMIN || role === UserRole.SOCIETY_COMMITTEE) return null;
   if (role === UserRole.RESIDENT_OWNER && flat.ownerUserId && flat.ownerUserId.toString() === req.user?.userId) return null;
+  if (role === UserRole.SOCIETY_ADMIN || role === UserRole.SOCIETY_COMMITTEE) {
+    if (action === 'sellFlat') {
+      if (!flat.ownerUserId) return null;
+      return 'Flat has already been sold. You cannot modify it.';
+    }
+    return 'Society admins can only sell vacant flats. You cannot perform this action.';
+  }
   return 'You are not allowed to manage this flat';
 };
 
@@ -28,6 +34,7 @@ const logLifecycle = (req: Request, action: string, flatId: string, values: any)
 /** Load the flat (tenant-scoped), authorize, run `op` in a transaction, and shape errors. */
 const runTransition = async (
   req: Request, res: Response, next: NextFunction,
+  action: string,
   op: (flat: any, session: mongoose.ClientSession, actor: lifecycle.Actor) => Promise<any>,
 ) => {
   const userId = req.user?.userId;
@@ -38,7 +45,7 @@ const runTransition = async (
   const flat = await Flat.findOne({ _id: req.params.flatId, societyId: new mongoose.Types.ObjectId(societyId) });
   if (!flat) { res.status(404).json({ error: 'Flat not found' }); return; }
 
-  const denied = assertManageAccess(req, flat);
+  const denied = assertManageAccess(req, flat, action);
   if (denied) { res.status(403).json({ error: denied }); return; }
 
   const session = await mongoose.startSession();
@@ -59,7 +66,7 @@ const runTransition = async (
 };
 
 export const rentOutFlat = (req: Request, res: Response, next: NextFunction) =>
-  runTransition(req, res, next, async (flat, session, actor) => {
+  runTransition(req, res, next, 'rentOutFlat', async (flat, session, actor) => {
     const d = rentOutSchema.parse(req.body);
     const out = await lifecycle.rentOut(String(flat._id), String(flat.societyId), {
       tenants: d.tenants,
@@ -74,17 +81,18 @@ export const rentOutFlat = (req: Request, res: Response, next: NextFunction) =>
   });
 
 export const sellFlat = (req: Request, res: Response, next: NextFunction) =>
-  runTransition(req, res, next, async (flat, session, actor) => {
+  runTransition(req, res, next, 'sellFlat', async (flat, session, actor) => {
     const d = sellSchema.parse(req.body);
     const out = await lifecycle.sellFlat(String(flat._id), String(flat.societyId), {
       buyer: d.buyer, saleAmountPaise: toPaise(d.saleAmount), saleDate: d.saleDate,
+      emailToken: d.emailToken, phoneToken: d.phoneToken,
     }, actor, session);
     logLifecycle(req, 'FLAT_SELL', String(flat._id), { buyer: d.buyer.name, saleAmount: d.saleAmount });
     return { message: 'Ownership transferred', tenureId: out.tenure._id };
   });
 
 export const endTenancy = (req: Request, res: Response, next: NextFunction) =>
-  runTransition(req, res, next, async (flat, session, actor) => {
+  runTransition(req, res, next, 'endTenancy', async (flat, session, actor) => {
     const d = dateActionSchema.parse(req.body);
     const out = await lifecycle.endTenancy(String(flat._id), String(flat.societyId), d.date, actor, session);
     logLifecycle(req, 'FLAT_END_TENANCY', String(flat._id), { endDate: d.date });
@@ -92,7 +100,7 @@ export const endTenancy = (req: Request, res: Response, next: NextFunction) =>
   });
 
 export const moveIn = (req: Request, res: Response, next: NextFunction) =>
-  runTransition(req, res, next, async (flat, session, actor) => {
+  runTransition(req, res, next, 'moveIn', async (flat, session, actor) => {
     const d = dateActionSchema.parse(req.body);
     await lifecycle.moveIn(String(flat._id), String(flat.societyId), d.date, actor, session);
     logLifecycle(req, 'FLAT_MOVE_IN', String(flat._id), { date: d.date });
@@ -100,7 +108,7 @@ export const moveIn = (req: Request, res: Response, next: NextFunction) =>
   });
 
 export const setVacant = (req: Request, res: Response, next: NextFunction) =>
-  runTransition(req, res, next, async (flat, session, actor) => {
+  runTransition(req, res, next, 'setVacant', async (flat, session, actor) => {
     const d = dateActionSchema.parse(req.body);
     await lifecycle.setVacant(String(flat._id), String(flat.societyId), d.date, actor, session);
     logLifecycle(req, 'FLAT_SET_VACANT', String(flat._id), { date: d.date });
@@ -137,7 +145,7 @@ export const addHistoricalTenure = async (req: Request, res: Response, next: Nex
 
     const flat = await Flat.findOne({ _id: req.params.flatId, societyId: new mongoose.Types.ObjectId(societyId) });
     if (!flat) { res.status(404).json({ error: 'Flat not found' }); return; }
-    const denied = assertManageAccess(req, flat);
+    const denied = assertManageAccess(req, flat, 'addHistoricalTenure');
     if (denied) { res.status(403).json({ error: denied }); return; }
 
     const d = historicalTenureSchema.parse(req.body);
@@ -170,7 +178,7 @@ export const updateTenure = async (req: Request, res: Response, next: NextFuncti
     if (tenure.source !== 'MIGRATION') { res.status(400).json({ error: 'Only historical (backfilled) records can be edited' }); return; }
 
     const flat = await Flat.findById(tenure.flatId);
-    const denied = assertManageAccess(req, flat);
+    const denied = assertManageAccess(req, flat, 'updateTenure');
     if (denied) { res.status(403).json({ error: denied }); return; }
 
     const d = updateTenureSchema.parse(req.body);
@@ -203,7 +211,7 @@ export const deleteTenure = async (req: Request, res: Response, next: NextFuncti
     if (tenure.source !== 'MIGRATION') { res.status(400).json({ error: 'Only historical (backfilled) records can be deleted' }); return; }
 
     const flat = await Flat.findById(tenure.flatId);
-    const denied = assertManageAccess(req, flat);
+    const denied = assertManageAccess(req, flat, 'deleteTenure');
     if (denied) { res.status(403).json({ error: denied }); return; }
 
     await tenure.deleteOne();

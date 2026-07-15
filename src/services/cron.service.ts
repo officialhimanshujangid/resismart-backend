@@ -10,6 +10,13 @@ import { SavedSearch } from '../models/saved-search.model';
 import { PropertyListing } from '../models/property-listing.model';
 import { User } from '../models/user.model';
 import { logger } from '../utils/logger.util';
+import { SocietyFinanceSettings } from '../models/society-finance-settings.model';
+import { SocietyFinanceService } from './society-finance.service';
+import { FinancePolicy } from '../models/finance-policy.model';
+import { generateInvoicesForSociety } from './invoicing.service';
+import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
+import { reconcileSocietyFunds } from './funds.service';
+import FinanceNotificationService from './finance-notification.service';
 
 const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 const endOfDay = (d: Date) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
@@ -198,7 +205,88 @@ export function startCronJobs(): void {
   cron.schedule('0 9 * * *', runDailyJobs);
   cron.schedule('5 9 * * *', runExpireListings);
   cron.schedule('0 * * * *', runExpireBoosts);
-  logger.info('[cron] Scheduled daily subscription jobs (09:00), listing expiry (09:05), and hourly boost expiry');
+  
+  // Finance: daily invoice generation honoring each society's configured
+  // generation day (FinancePolicy.billing.generationDay), replacing the old
+  // hardcoded 1st-of-month bill run.
+  cron.schedule('30 0 * * *', async () => {
+    const day = new Date().getDate();
+    logger.info(`[cron] Invoice generation check for day ${day}`);
+    try {
+      const policies = await FinancePolicy.find({ 'billing.autoGenerateEnabled': true, 'billing.generationDay': day }).select('societyId').lean();
+      for (const p of policies) {
+        try {
+          const r = await generateInvoicesForSociety(p.societyId.toString());
+          logger.info(`[cron] Society ${p.societyId}: ${r.created} invoice(s) generated for ${r.period} (${r.skipped} skipped)`);
+        } catch (e: any) {
+          logger.error(`[cron] Invoice gen failed for society ${p.societyId}: ${e.message}`);
+        }
+      }
+    } catch (err: any) {
+      logger.error(`[cron] Invoice generation job failed: ${err.message}`);
+    }
+  });
+
+  cron.schedule('0 10 * * *', async () => {
+    logger.info('[cron] Running late fee application');
+    try {
+      const societies = await SocietyFinanceSettings.find({ lateFeeEnabled: true }).lean();
+      for (const soc of societies) {
+        await SocietyFinanceService.applyLateFeesToSociety(soc.societyId.toString());
+      }
+    } catch (err: any) {
+      logger.error(`[cron] Late fee application failed: ${err.message}`);
+    }
+  });
+
+  // Finance: daily due-date reminders + funds reconciliation (08:30).
+  cron.schedule('30 8 * * *', async () => {
+    logger.info('[cron] Running finance reminders + funds reconciliation');
+    try {
+      const policies = await FinancePolicy.find({ $or: [{ 'reminders.enabled': true }] }).select('societyId reminders').lean();
+      const today = startOfDay(new Date());
+      for (const p of policies) {
+        try {
+          for (const n of p.reminders?.beforeDueDays || []) {
+            const t = new Date(today); t.setDate(t.getDate() + n);
+            await sendDueReminders(p.societyId.toString(), { $gte: t, $lte: endOfDay(t) }, n);
+          }
+          for (const n of p.reminders?.afterDueDays || []) {
+            const t = new Date(today); t.setDate(t.getDate() - n);
+            await sendDueReminders(p.societyId.toString(), { $gte: t, $lte: endOfDay(t) }, -n);
+          }
+        } catch (e: any) { logger.error(`[cron] reminders failed for ${p.societyId}: ${e.message}`); }
+      }
+      // Reconcile all societies' fund cards against their ledger balances.
+      const fundSocieties = await FinancePolicy.find({}).select('societyId').lean();
+      for (const p of fundSocieties) {
+        try { await reconcileSocietyFunds(p.societyId.toString()); } catch { /* ignore */ }
+      }
+    } catch (err: any) {
+      logger.error(`[cron] Finance reminders/reconcile job failed: ${err.message}`);
+    }
+  });
+
+  logger.info('[cron] Scheduled daily subscription jobs (09:00), listing expiry (09:05), hourly boost expiry, and finance jobs');
+}
+
+/** Email due/overdue reminders for a society's outstanding invoices (deduped per offset per day). */
+async function sendDueReminders(societyId: string, dueMatch: any, offsetDays: number): Promise<void> {
+  const invoices = await MaintenanceInvoice.find({
+    societyId, outstandingPaise: { $gt: 0 }, status: { $in: ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] },
+    dueDate: dueMatch, primaryOwnerUserId: { $exists: true },
+  }).limit(500);
+  const today = startOfDay(new Date()).getTime();
+  for (const inv of invoices) {
+    if (inv.remindersSent?.some(r => r.offsetDays === offsetDays && startOfDay(new Date(r.sentAt)).getTime() === today)) continue;
+    const owner = await User.findById(inv.primaryOwnerUserId).select('email name').lean();
+    if (!owner?.email) continue;
+    const amt = `₹${(inv.outstandingPaise / 100).toLocaleString('en-IN')}`;
+    const when = offsetDays >= 0 ? `is due on ${inv.dueDate.toLocaleDateString('en-IN')}` : `is overdue since ${inv.dueDate.toLocaleDateString('en-IN')}`;
+    FinanceNotificationService.sendEmailSafe(owner.email, `Maintenance dues reminder — ${inv.invoiceNumber}`, `<p>Dear ${owner.name || 'Resident'},</p><p>Invoice <b>${inv.invoiceNumber}</b> of <b>${amt}</b> ${when}. Please pay via your ResiSmart resident portal.</p>`);
+    inv.remindersSent.push({ sentAt: new Date(), offsetDays, channel: 'EMAIL' });
+    await inv.save();
+  }
 }
 
 export default startCronJobs;

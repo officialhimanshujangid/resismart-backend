@@ -5,7 +5,7 @@ import { FlatTenure, TenureType } from '../models/flat-tenure.model';
 import { RentalAgreement } from '../models/rental.model';
 import { User } from '../models/user.model';
 import { attachTenantMembership } from './identity.service';
-import { logFlatEvent } from './household.service';
+import { logFlatEvent, verifyContacts, consumeContacts } from './household.service';
 import EmailService from './email.service';
 import { isEmail } from '../utils/phone.util';
 import { TenantType, UserRole } from '../constants/roles';
@@ -101,7 +101,7 @@ const registerPerson = async (
       relationship: person.relationship || (isOwner ? 'OWNER' : 'OTHER'),
       isOwner, isHead, householdType, isActive: true, moveInDate: opts.moveInDate, documents: [], ...audit(actor),
     }], { session });
-    return [];
+    return { ids: [], generatedPassword: undefined };
   }
 
   const identities = await attachTenantMembership({
@@ -130,7 +130,7 @@ const registerPerson = async (
       }], { session });
     }
   }
-  return ids;
+  return { ids, generatedPassword: identities.generatedPassword };
 };
 
 const syncFlatResidents = async (flatId: mongoose.Types.ObjectId, session: mongoose.ClientSession) => {
@@ -184,10 +184,10 @@ export const rentOut = async (flatId: string, societyId: string, input: RentOutI
     // A co-tenant/friend or the head is a TENANT (RESIDENT_TENANT); a tenant's relative is FAMILY_MEMBER.
     const relationship = isHead ? 'TENANT' : (t.relationship || 'TENANT');
     const role = relationship === 'TENANT' ? UserRole.RESIDENT_TENANT : UserRole.FAMILY_MEMBER;
-    const ids = await registerPerson(fId, sId, { name: t.name, email: t.email, phone: t.phone, relationship }, role, false, actor, session, { householdType: 'TENANT', isHead, moveInDate: input.startDate });
+    const { ids, generatedPassword } = await registerPerson(fId, sId, { name: t.name, email: t.email, phone: t.phone, relationship }, role, false, actor, session, { householdType: 'TENANT', isHead, moveInDate: input.startDate });
     if (isHead) headIds = ids;
     occupantsList.push(ids[0] ? { userId: ids[0], name: t.name, relationship } : { name: t.name, relationship });
-    if (t.email && isEmail(t.email)) EmailService.sendTenantAccessEmail(t.email, flatLabel(flat), 'flat', [['Role', relationship === 'TENANT' ? 'TENANT' : relationship]]);
+    if (t.email && isEmail(t.email)) EmailService.sendTenantAccessEmail(t.email, flatLabel(flat), 'flat', [['Role', relationship === 'TENANT' ? 'TENANT' : relationship]], generatedPassword);
   }
 
   const [agreement] = await RentalAgreement.create([{
@@ -254,7 +254,7 @@ export const endTenancy = async (flatId: string, societyId: string, endDate: Dat
   return { endedTenureId: tenancy._id, nextStatus: FlatStatus.VACANT };
 };
 
-export interface SellInput { buyer: PersonInput; saleAmountPaise?: number; saleDate: Date; }
+export interface SellInput { buyer: PersonInput; saleAmountPaise?: number; saleDate: Date; emailToken?: string; phoneToken?: string; }
 
 /** Transfer ownership: end current ownership (+ any tenancy), register buyer as owner, open OWNERSHIP tenure. */
 export const sellFlat = async (flatId: string, societyId: string, input: SellInput, actor: Actor, session: mongoose.ClientSession) => {
@@ -273,7 +273,9 @@ export const sellFlat = async (flatId: string, societyId: string, input: SellInp
   await Flat.updateOne({ _id: fId }, { $set: { ownerUserId: null, status: FlatStatus.VACANT } }, { session });
 
   // Register the buyer as the new owner.
-  const buyerIds = await registerPerson(fId, sId, { ...input.buyer, relationship: 'OWNER' }, UserRole.RESIDENT_OWNER, true, actor, session);
+  const verified = await verifyContacts(input.buyer, input);
+  const { ids: buyerIds, generatedPassword } = await registerPerson(fId, sId, { ...input.buyer, relationship: 'OWNER' }, UserRole.RESIDENT_OWNER, true, actor, session, { householdType: 'OWNER', moveInDate: input.saleDate });
+  await consumeContacts(input.buyer, verified);
 
   const [tenure] = await FlatTenure.create([{
     flatId: fId, societyId: sId, type: 'OWNERSHIP',
@@ -286,7 +288,7 @@ export const sellFlat = async (flatId: string, societyId: string, input: SellInp
   await Flat.updateOne({ _id: fId }, { $set: { ownerUserId: buyerIds[0], status: FlatStatus.OWNER_OCCUPIED, updatedBy: actor.userId, updatedByName: actor.name } }, { session });
 
   if (input.buyer.email && isEmail(input.buyer.email)) {
-    EmailService.sendTenantAccessEmail(input.buyer.email, flatLabel(flat), 'flat', [['Role', 'OWNER']]);
+    EmailService.sendTenantAccessEmail(input.buyer.email, flatLabel(flat), 'flat', [['Role', 'OWNER']], generatedPassword);
   }
   await logFlatEvent({
     flatId: fId, societyId: sId, type: 'OWNER_CHANGED', actor, tenureId: tenure._id as any,

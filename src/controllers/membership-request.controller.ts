@@ -105,7 +105,7 @@ export const createRegistrationRequest = async (req: Request, res: Response, nex
       const session = await mongoose.startSession();
       session.startTransaction();
       try {
-        await materializeMembership({
+        const result = await materializeMembership({
           flatId: flat._id as mongoose.Types.ObjectId,
           societyId: new mongoose.Types.ObjectId(societyId),
           name: data.name, email, phone,
@@ -126,7 +126,7 @@ export const createRegistrationRequest = async (req: Request, res: Response, nex
         await session.commitTransaction();
         session.endSession();
 
-        if (email) EmailService.sendTenantAccessEmail(email, flat.number, 'flat', [['Society', society?.name || 'Society']]);
+        if (email) EmailService.sendTenantAccessEmail(email, flat.number, 'flat', [['Society', society?.name || 'Society']], result.generatedPassword);
         AuditService.log({
           userId, userName, tenantId: societyId, tenantType: TenantType.SOCIETY,
           action: 'RESIDENT_REGISTER_AUTO', resource: 'MembershipRequest', resourceId: created._id.toString(),
@@ -239,7 +239,7 @@ export const approveRegistrationRequest = async (req: Request, res: Response, ne
     if (request.status !== 'PENDING') { await session.abortTransaction(); session.endSession(); res.status(400).json({ error: `Request is already ${request.status.toLowerCase()}` }); return; }
     if (!canDecide(role, userId, request)) { await session.abortTransaction(); session.endSession(); res.status(403).json({ error: 'You are not the designated approver for this request' }); return; }
 
-    await materializeMembership({
+    const result = await materializeMembership({
       flatId: request.flatId as mongoose.Types.ObjectId,
       societyId: request.societyId as mongoose.Types.ObjectId,
       name: request.targetName,
@@ -263,7 +263,7 @@ export const approveRegistrationRequest = async (req: Request, res: Response, ne
     session.endSession();
 
     const society = await Society.findById(societyId).select('name').lean();
-    if (request.targetEmail) EmailService.sendTenantAccessEmail(request.targetEmail, 'your flat', 'flat', [['Society', society?.name || 'Society']]);
+    if (request.targetEmail) EmailService.sendTenantAccessEmail(request.targetEmail, 'your flat', 'flat', [['Society', society?.name || 'Society']], result.generatedPassword);
 
     AuditService.log({
       userId, userName, tenantId: societyId, tenantType: TenantType.SOCIETY,

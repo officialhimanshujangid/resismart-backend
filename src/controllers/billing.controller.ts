@@ -12,6 +12,12 @@ import { InvoiceService } from '../services/invoice.service';
 import s3Service from '../services/s3.service';
 import EmailService from '../services/email.service';
 import { AuditService } from '../services/audit.service';
+import { BillPayment } from '../models/bill-payment.model';
+import { SocietyBill } from '../models/society-bill.model';
+import { FinanceLedgerEntry } from '../models/finance-ledger-entry.model';
+import { Receipt } from '../models/receipt.model';
+import { confirmGatewayReceipt } from '../services/collections.service';
+import FinanceNotificationService from '../services/finance-notification.service';
 import { resolveTenantEmail } from '../utils/tenant-email.util';
 import { getGoverningSubscription, getEffectiveLimits, capsToObject } from '../services/subscription-lifecycle.service';
 import { runExpireOverdue, runExpiryReminders } from '../services/cron.service';
@@ -201,7 +207,82 @@ export class BillingController {
 
       if (type === 'payment_link.paid') {
         const linkId = event?.payload?.payment_link?.entity?.id;
+        const eventId = event?.id; // Webhook event ID
+        
         if (linkId) {
+          // 0. Phase 3: society maintenance Receipt (new consolidated invoicing).
+          const receipt = await Receipt.findOne({ razorpayPaymentLinkId: linkId });
+          if (receipt) {
+            if (receipt.status !== 'CLEARED' && !(await Receipt.findOne({ razorpayWebhookEventId: eventId }))) {
+              await confirmGatewayReceipt(receipt.societyId.toString(), receipt._id.toString(), { razorpayPaymentId: paymentId, razorpayWebhookEventId: eventId }, { userId: 'SYSTEM', userName: 'Razorpay Webhook' });
+            }
+            return res.status(200).json({ received: true });
+          }
+
+          // 1. Legacy society bill payment (pre-Phase-3)
+          const billPayment = await BillPayment.findOne({ razorpayPaymentLinkId: linkId });
+          if (billPayment && billPayment.status !== 'CONFIRMED') {
+            // Check idempotency
+            const exists = await BillPayment.findOne({ razorpayWebhookEventId: eventId });
+            if (!exists) {
+              const session = await mongoose.startSession();
+              try {
+                let billObj: any = null;
+                await session.withTransaction(async () => {
+                  billPayment.status = 'CONFIRMED';
+                  billPayment.razorpayPaymentId = paymentId;
+                  billPayment.razorpayWebhookEventId = eventId;
+                  billPayment.razorpayWebhookAt = new Date();
+                  billPayment.paymentDate = new Date();
+                  await billPayment.save({ session });
+                  
+                  const bill = await SocietyBill.findById(billPayment.billId);
+                  if (bill) {
+                    bill.paidAmountPaise += billPayment.amountPaise;
+                    bill.status = bill.paidAmountPaise >= bill.totalAmountPaise ? 'PAID' : 'PARTIALLY_PAID';
+                    await bill.save({ session });
+                    
+                    billObj = bill;
+                    
+                    await FinanceLedgerEntry.create([{
+                      societyId: billPayment.societyId,
+                      billId: bill._id,
+                      paymentId: billPayment._id,
+                      entryType: 'PAYMENT_RECEIVED',
+                      description: `Online Payment received via Razorpay`,
+                      debitPaise: 0,
+                      creditPaise: billPayment.amountPaise,
+                      flatId: bill.flatId,
+                      flatNumber: bill.flatNumber,
+                      billingPeriod: bill.billingPeriod,
+                      performedBy: 'SYSTEM',
+                      performedByName: 'Razorpay Webhook',
+                    }], { session });
+                  }
+                });
+                
+                // Send email
+                if (billObj) {
+                   const owner = await User.findById(billObj.primaryOwnerUserId).select('email name');
+                   if (owner?.email) {
+                     FinanceNotificationService.sendPaymentConfirmedEmail(owner.email, owner.name, billPayment, billObj);
+                   }
+                }
+                
+                return res.status(200).json({ received: true });
+              } catch (err: any) {
+                logger.error(`Failed to process BillPayment via webhook: ${err.message}`);
+                // Don't throw, let it fall through or return 500
+              } finally {
+                session.endSession();
+              }
+            } else {
+               // Already processed
+               return res.status(200).json({ received: true });
+            }
+          }
+
+          // 2. Check if it's a subscription assign cash plan payment
           const invoice = await Invoice.findOne({ razorpayPaymentLinkId: linkId });
           if (invoice && invoice.status !== 'PAID') await BillingController.processPaidLinkInvoice(invoice, paymentId);
         }

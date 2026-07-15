@@ -50,6 +50,8 @@ export const sellSchema = z.object({
   buyer: personWithContact,
   saleAmount: rupees.optional(),
   saleDate: z.coerce.date().default(() => new Date()),
+  emailToken: z.string().optional(),
+  phoneToken: z.string().optional(),
 });
 
 export const dateActionSchema = z.object({

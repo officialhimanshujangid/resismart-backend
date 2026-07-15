@@ -86,14 +86,21 @@ export class RazorpayService {
    * Creates a one-time hosted Payment Link (for owner-initiated online collection).
    * Razorpay emails/SMSes the link and fires `payment_link.paid` when paid.
    */
+  /** Build a Razorpay client from a society's OWN keys (for per-society settlement). */
+  static clientFromKeys(keyId: string, keySecret: string): Razorpay {
+    return new Razorpay({ key_id: keyId, key_secret: keySecret });
+  }
+
   static async createPaymentLink(opts: {
     amountPaise: number;
     description: string;
     customer: { name?: string; email?: string; contact?: string };
     notes?: Record<string, string>;
     callbackUrl?: string;
+    client?: Razorpay; // when set, use this (per-society) client instead of the platform one
   }) {
-    const link = await this.getClient().paymentLink.create({
+    const rzp = opts.client || this.getClient();
+    const link = await rzp.paymentLink.create({
       amount: Math.round(opts.amountPaise),
       currency: 'INR',
       description: opts.description.slice(0, 2048),
@@ -140,6 +147,82 @@ export class RazorpayService {
       .update(`${paymentId}|${subscriptionId}`)
       .digest('hex');
     return this.timingSafeEqual(expected, signature);
+  }
+
+  /**
+   * Creates a contact in Razorpay for a vendor (society).
+   */
+  static async createContact(societyId: string, name: string, email?: string): Promise<any> {
+    // @ts-ignore
+    const contact = await this.getClient().api.post({
+      url: '/contacts',
+      data: {
+        name,
+        email,
+        type: 'vendor',
+        reference_id: societyId,
+      }
+    });
+    logger.info(`Razorpay contact created: ${(contact as any).id} for society ${societyId}`);
+    return contact;
+  }
+
+  /**
+   * Creates a fund account linked to a Razorpay contact (bank account).
+   */
+  static async createFundAccount(contactId: string, accountName: string, accountNumber: string, ifsc: string): Promise<any> {
+    // @ts-ignore
+    const fundAccount = await this.getClient().api.post({
+      url: '/fund_accounts',
+      data: {
+        contact_id: contactId,
+        account_type: 'bank_account',
+        bank_account: {
+          name: accountName,
+          account_number: accountNumber,
+          ifsc,
+        }
+      }
+    });
+    logger.info(`Razorpay fund account created: ${(fundAccount as any).id} for contact ${contactId}`);
+    return fundAccount;
+  }
+
+  /**
+   * Validates a fund account via penny drop.
+   */
+  static async validateFundAccount(fundAccountId: string, accountNumber: string): Promise<any> {
+    // @ts-ignore
+    const validation = await this.getClient().api.post({
+      url: '/fund_accounts/validations',
+      data: {
+        account_number: accountNumber,
+        fund_account: {
+          id: fundAccountId
+        },
+        amount: 100, // ₹1
+        currency: 'INR',
+        notes: {
+          description: 'Society verification',
+        }
+      }
+    });
+    logger.info(`Razorpay fund account validation initiated: ${(validation as any).id} for fund account ${fundAccountId}`);
+    return validation;
+  }
+
+  /**
+   * Fetches the status of a validation request.
+   */
+  static async fetchValidation(validationId: string): Promise<any> {
+    // The razorpay node SDK might not have a direct fetch method for validation
+    // If not, we can use the generic api wrapper or `api.get` but Razorpay SDK v2.9+ should support it or we can do it via API.
+    // Assuming standard SDK doesn't have it directly exposed as `fundAccount.fetchValidation`
+    // We'll use the raw request method:
+    // @ts-ignore
+    return this.getClient().api.get({
+      url: `/fund_accounts/validations/${validationId}`,
+    });
   }
 
   /**

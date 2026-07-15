@@ -204,9 +204,13 @@ export const listEligibleMembers = async (societyId: string) => {
   const out: any[] = [];
   for (const r of rows as any[]) {
     const uid = r.userId?._id?.toString() || r.userId?.toString();
-    if (!uid || seen.has(uid)) continue;
-    seen.add(uid);
-    out.push({ userId: uid, name: r.person?.name || r.userId?.name || 'Resident', flatLabel: flatMap.get(r.flatId?.toString()) || '', relationship: r.relationship, isOwner: r.isOwner });
+    const name = (r.person?.name || r.userId?.name || 'Resident').trim();
+    const flatIdStr = r.flatId?.toString() || 'noflat';
+    const dedupKey = uid;
+    
+    if (!uid || seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    out.push({ userId: uid, name, flatLabel: flatMap.get(r.flatId?.toString()) || '', relationship: r.relationship, isOwner: r.isOwner });
   }
   return out;
 };

@@ -100,7 +100,7 @@ export const createFlat = async (req: Request, res: Response, next: NextFunction
       consumePhone = normPhone;
 
       const society = await Society.findById(societyId).select('name').session(session);
-      EmailService.sendTenantAccessEmail(email, `${block.name}-${validatedData.number}`, 'flat', [['Society', society?.name || 'Society']]);
+      EmailService.sendTenantAccessEmail(email, `${block.name}-${validatedData.number}`, 'flat', [['Society', society?.name || 'Society']], identities.generatedPassword);
     }
 
     // Retrieve society for location if needed
@@ -225,6 +225,14 @@ export const updateFlat = async (req: Request, res: Response, next: NextFunction
     if (!flat) {
       res.status(404).json({ error: 'Flat not found' });
       return;
+    }
+
+    const role = req.user?.activeRole;
+    if (role === UserRole.SOCIETY_ADMIN || role === UserRole.SOCIETY_COMMITTEE) {
+      if (flat.ownerUserId) {
+        res.status(403).json({ error: 'Flat has already been sold. You cannot modify it.' });
+        return;
+      }
     }
 
     const oldValues = {

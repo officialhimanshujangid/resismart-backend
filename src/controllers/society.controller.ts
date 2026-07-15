@@ -495,6 +495,6 @@ async function provisionSocietyAdmin(society: any, email: string, name: string):
   });
 
   society.adminUserId = primaryIdentityId(result);
-  if (email) EmailService.sendTenantAccessEmail(email, society.name, 'society');
+  if (email) EmailService.sendTenantAccessEmail(email, society.name, 'society', [], result.generatedPassword);
 }
 

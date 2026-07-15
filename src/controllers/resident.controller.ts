@@ -107,7 +107,7 @@ export const addResident = async (req: Request, res: Response, next: NextFunctio
     await flat.save({ session });
 
     const society = await Society.findById(societyId).select('name').session(session);
-    EmailService.sendTenantAccessEmail(email, flat.number, 'flat', [['Society', society?.name || 'Society']]);
+    EmailService.sendTenantAccessEmail(email, flat.number, 'flat', [['Society', society?.name || 'Society']], identities.generatedPassword);
 
     await session.commitTransaction();
     session.endSession();

@@ -32,6 +32,9 @@ export const appConfig = {
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:4444',
   mongoUri: process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/resismart',
   jwtAccessSecret: requireSecret('JWT_ACCESS_SECRET', 'dev_only_access_secret_do_not_use_in_prod'),
+  // Dedicated key for finance secrets (society gateway keys, vendor bank). Kept
+  // separate from the JWT secret so rotating auth secrets never loses finance data.
+  financeEncryptionKey: process.env.FINANCE_ENCRYPTION_KEY || requireSecret('JWT_ACCESS_SECRET', 'dev_only_access_secret_do_not_use_in_prod') + '::finance',
   jwtRefreshSecret: requireSecret('JWT_REFRESH_SECRET', 'dev_only_refresh_secret_do_not_use_in_prod'),
   jwtAccessExpiry: process.env.JWT_ACCESS_EXPIRY || '15m',
   jwtRefreshExpiry: process.env.JWT_REFRESH_EXPIRY || '7d',
@@ -58,6 +61,7 @@ export const appConfig = {
   razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
   razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
+  razorpayBypassPennyDrop: process.env.RAZORPAY_BYPASS_PENNY_DROP === 'true',
 };
 
 /**

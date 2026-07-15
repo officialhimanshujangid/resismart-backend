@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { User } from './models/user.model';
-import { Plan } from './models/plan.model';
+
 import { GlobalSetting } from './models/global-setting.model';
 import { hashPassword } from './utils/hash.util';
 import { TenantType, UserRole } from './constants/roles';

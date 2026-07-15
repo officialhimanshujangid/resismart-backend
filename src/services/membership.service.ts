@@ -163,5 +163,5 @@ export const materializeMembership = async (args: MaterializeArgs, session: mong
   flat.updatedByName = args.actorName;
   await flat.save({ session });
 
-  return { residents: created, identityIds };
+  return { residents: created, identityIds, generatedPassword: identities.generatedPassword };
 };

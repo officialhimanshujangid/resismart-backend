@@ -434,7 +434,7 @@ async function provisionShopAdmin(shop: any, email: string, name: string, _passw
 
   shop.adminUserId = primaryIdentityId(result);
   await shop.save();
-  if (email) EmailService.sendTenantAccessEmail(email, shop.name, 'shop');
+  if (email) EmailService.sendTenantAccessEmail(email, shop.name, 'shop', [], result.generatedPassword);
 }
 
 export const getMyShop = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
