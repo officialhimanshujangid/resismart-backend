@@ -1,3 +1,4 @@
+import './config/timezone'; // MUST stay first — pins TZ before any date code loads
 import app from './app';
 import { appConfig, assertConfig, isRazorpayConfigured } from './config/appConfig';
 import { connectDatabase } from './config/db';

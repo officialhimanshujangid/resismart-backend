@@ -27,6 +27,18 @@ export interface IFlat extends Document {
   carpetAreaSqft?: number;
   builtUpAreaSqft?: number;
 
+  /**
+   * Free-form per-flat counts for PER_QUANTITY charge heads, e.g.
+   * `{ parkingSlots: 2 }` to bill "2 cars × ₹500".
+   *
+   * A map rather than a column per idea: a society can start billing anything
+   * countable — scooter bays, extra water tankers, pet registrations — by
+   * agreeing on a key with the charge head, with no schema change per idea. A
+   * missing key means zero, so a head can be added before every flat has a
+   * count and nobody is billed for something they don't have.
+   */
+  quantities?: Record<string, number>;
+
   ownerUserId?: mongoose.Types.ObjectId; // User with UserRole.RESIDENT_OWNER (Head of flat)
   owners: mongoose.Types.ObjectId[]; // Legacy/Backward compat
   residents: mongoose.Types.ObjectId[]; // Refs to Resident model
@@ -86,6 +98,7 @@ const FlatSchema = new Schema<IFlat>({
   },
   carpetAreaSqft: { type: Number, min: 0 },
   builtUpAreaSqft: { type: Number, min: 0 },
+  quantities: { type: Map, of: Number, default: undefined },
   ownerUserId: {
     type: Schema.Types.ObjectId,
     ref: 'User',

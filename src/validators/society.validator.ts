@@ -55,6 +55,12 @@ export const updateFlatSchema = z.object({
   familyMembers: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID')).optional(),
   latitude: z.coerce.number().min(-90).max(90).optional(),
   longitude: z.coerce.number().min(-180).max(180).optional(),
+  // Counts for PER_QUANTITY charge heads, e.g. { parkingSlots: 2 }. Whole
+  // numbers only — half a parking slot is not a thing anyone can bill for.
+  quantities: z.record(
+    z.string().max(40).regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Use a simple key like parkingSlots'),
+    z.number().int('Counts must be whole numbers').min(0),
+  ).optional(),
 });
 
 export const createResidentSchema = z.object({

@@ -15,7 +15,6 @@ import { SocietyFinanceService } from './society-finance.service';
 import { FinancePolicy } from '../models/finance-policy.model';
 import { generateInvoicesForSociety } from './invoicing.service';
 import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
-import { reconcileSocietyFunds } from './funds.service';
 import FinanceNotificationService from './finance-notification.service';
 
 const startOfDay = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
@@ -257,13 +256,9 @@ export function startCronJobs(): void {
           }
         } catch (e: any) { logger.error(`[cron] reminders failed for ${p.societyId}: ${e.message}`); }
       }
-      // Reconcile all societies' fund cards against their ledger balances.
-      const fundSocieties = await FinancePolicy.find({}).select('societyId').lean();
-      for (const p of fundSocieties) {
-        try { await reconcileSocietyFunds(p.societyId.toString()); } catch { /* ignore */ }
-      }
+      // No fund reconcile pass: balances derive from the ledger on read.
     } catch (err: any) {
-      logger.error(`[cron] Finance reminders/reconcile job failed: ${err.message}`);
+      logger.error(`[cron] Finance reminders job failed: ${err.message}`);
     }
   });
 

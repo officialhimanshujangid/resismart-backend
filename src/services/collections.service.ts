@@ -1,11 +1,13 @@
 import mongoose, { ClientSession } from 'mongoose';
 import { Receipt, ReceiptMode, IReceipt } from '../models/receipt.model';
 import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
+import { JournalEntry } from '../models/journal-entry.model';
 import { postJournal, reverseJournal, PostLineInput } from './ledger.service';
 import { nextDocNumber } from './finance-sequence.service';
 import { getOrCreatePolicy, getFyStartMonth } from './finance-policy.service';
 import { getFinancialYear } from '../utils/financial-year.util';
 import { ACCOUNT_CODES } from './chart-of-accounts.seed';
+import { splitPayment, InterestOrder } from './allocation.util';
 
 /** Asset account money lands in, per payment mode. */
 export function depositAccountForMode(mode: ReceiptMode): string {
@@ -15,7 +17,7 @@ export function depositAccountForMode(mode: ReceiptMode): string {
 }
 
 interface AllocationResult {
-  allocations: { invoiceId: any; invoiceNumber: string; billingPeriod: string; appliedPaise: number }[];
+  allocations: { invoiceId: any; invoiceNumber: string; billingPeriod: string; appliedPaise: number; appliedToInterestPaise: number }[];
   advanceCreatedPaise: number;
 }
 
@@ -24,7 +26,13 @@ interface AllocationResult {
  * mutating invoice outstanding/allocated/status in the session. Leftover after
  * all invoices are cleared becomes advance credit.
  */
-async function allocateFifo(societyId: any, flatId: any, amountPaise: number, session: ClientSession): Promise<AllocationResult> {
+async function allocateFifo(
+  societyId: any,
+  flatId: any,
+  amountPaise: number,
+  session: ClientSession,
+  interestOrder: InterestOrder = 'PRINCIPAL_FIRST',
+): Promise<AllocationResult> {
   const open = await MaintenanceInvoice.find({
     societyId, flatId, outstandingPaise: { $gt: 0 },
     status: { $in: ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] },
@@ -34,13 +42,20 @@ async function allocateFifo(societyId: any, flatId: any, amountPaise: number, se
   const allocations: AllocationResult['allocations'] = [];
   for (const inv of open) {
     if (remaining <= 0) break;
-    const apply = Math.min(remaining, inv.outstandingPaise);
+    // Oldest bill first, then dues-before-penalty (or the reverse) inside it.
+    const { applyPaise: apply, toInterestPaise } = splitPayment(
+      interestOrder, remaining, inv.outstandingPaise, inv.interestOutstandingPaise || 0,
+    );
     if (apply <= 0) continue;
     inv.allocatedPaise += apply;
     inv.outstandingPaise -= apply;
+    inv.interestOutstandingPaise = Math.max(0, (inv.interestOutstandingPaise || 0) - toInterestPaise);
     inv.status = inv.outstandingPaise <= 0 ? 'PAID' : 'PARTIALLY_PAID';
     await inv.save({ session });
-    allocations.push({ invoiceId: inv._id, invoiceNumber: inv.invoiceNumber, billingPeriod: inv.billingPeriod, appliedPaise: apply });
+    allocations.push({
+      invoiceId: inv._id, invoiceNumber: inv.invoiceNumber, billingPeriod: inv.billingPeriod,
+      appliedPaise: apply, appliedToInterestPaise: toInterestPaise,
+    });
     remaining -= apply;
   }
   return { allocations, advanceCreatedPaise: Math.max(0, remaining) };
@@ -102,7 +117,7 @@ export async function recordClearedReceipt(societyId: string, input: CreateRecei
         { prefix: policy.numbering.receipt.prefix, padding: policy.numbering.receipt.padding, template: policy.numbering.receipt.template },
         session,
       );
-      const { allocations, advanceCreatedPaise } = await allocateFifo(societyId, input.flatId, input.amountPaise, session);
+      const { allocations, advanceCreatedPaise } = await allocateFifo(societyId, input.flatId, input.amountPaise, session, policy.allocation?.interestOrder);
       const allocatedPaise = allocations.reduce((s, a) => s + a.appliedPaise, 0);
 
       const [r] = await Receipt.create([{
@@ -165,7 +180,17 @@ export async function confirmReceipt(societyId: string, receiptId: string, actor
       if (!receipt) throw new Error('Receipt not found');
       if (receipt.status !== 'PENDING_CONFIRMATION') throw new Error('Receipt is not pending confirmation');
 
-      const { allocations, advanceCreatedPaise } = await allocateFifo(societyId, receipt.flatId, receipt.amountPaise, session);
+      // Dual control. The setting was in Settings from the start and read by
+      // nothing: whoever recorded a receipt could confirm it into the ledger
+      // alone while the screen said a second pair of eyes was required. A
+      // control that reports as on but does nothing is worse than none, because
+      // it stops anyone asking the question. Mirrors the refund rule.
+      if (policy.approvals?.requireDualControlForReceipts
+        && String(receipt.recordedBy) === String(actor.userId)) {
+        throw new Error('This receipt needs a different person to confirm it than the one who recorded it');
+      }
+
+      const { allocations, advanceCreatedPaise } = await allocateFifo(societyId, receipt.flatId, receipt.amountPaise, session, policy.allocation?.interestOrder);
       receipt.allocations = allocations as any;
       receipt.advanceCreatedPaise = advanceCreatedPaise;
       receipt.status = 'CLEARED';
@@ -196,7 +221,10 @@ export async function confirmGatewayReceipt(
   opts: { razorpayPaymentId?: string; razorpayWebhookEventId?: string },
   actor: { userId: string; userName: string },
 ): Promise<IReceipt | null> {
-  const startMonth = await getFyStartMonth(societyId);
+  // The whole policy, not just the FY month: a gateway payment is appropriated
+  // by the same rule as one taken at the desk.
+  const policy = await getOrCreatePolicy(societyId, actor.userId, actor.userName);
+  const startMonth = policy.financialYear?.startMonth ?? 4;
   const session = await mongoose.startSession();
   try {
     let out: IReceipt | null = null;
@@ -205,7 +233,7 @@ export async function confirmGatewayReceipt(
       if (!receipt) return;
       if (receipt.status === 'CLEARED') { out = receipt; return; } // idempotent
 
-      const { allocations, advanceCreatedPaise } = await allocateFifo(societyId, receipt.flatId, receipt.amountPaise, session);
+      const { allocations, advanceCreatedPaise } = await allocateFifo(societyId, receipt.flatId, receipt.amountPaise, session, policy.allocation?.interestOrder);
       receipt.allocations = allocations as any;
       receipt.advanceCreatedPaise = advanceCreatedPaise;
       receipt.status = 'CLEARED';
@@ -244,6 +272,8 @@ export async function rejectReceipt(societyId: string, receiptId: string, reason
  * paid (un-allocate), and mark it BOUNCED. Never edits the original journal.
  */
 export async function bounceReceipt(societyId: string, receiptId: string, actor: { userId: string; userName: string }, reason?: string): Promise<IReceipt> {
+  const policy = await getOrCreatePolicy(societyId, actor.userId, actor.userName);
+  const startMonth = policy.financialYear?.startMonth ?? 4;
   const session = await mongoose.startSession();
   try {
     let out: IReceipt;
@@ -258,12 +288,84 @@ export async function bounceReceipt(societyId: string, receiptId: string, actor:
         if (!inv) continue;
         inv.allocatedPaise = Math.max(0, inv.allocatedPaise - a.appliedPaise);
         inv.outstandingPaise += a.appliedPaise;
+        // Put the penalty back exactly as it stood. Restoring only the total
+        // would leave the bill claiming its interest was settled, and next
+        // month's interest would be charged on the wrong base.
+        inv.interestOutstandingPaise = (inv.interestOutstandingPaise || 0) + (a.appliedToInterestPaise || 0);
         inv.status = inv.allocatedPaise + inv.advanceAppliedPaise <= 0 ? 'ISSUED' : 'PARTIALLY_PAID';
         await inv.save({ session });
       }
 
+      // Claw back advance this receipt created that a LATER invoice has already
+      // spent. Reversing the receipt journal alone debits Members' Advance by the
+      // full amount created; if an invoice has since consumed some of it, that
+      // liability is no longer there to remove, so it goes negative — a Dr balance
+      // on a liability — while the newer invoice keeps claiming it was part-funded
+      // by a cheque that bounced. The member is then chased for less than they owe
+      // and Σ`outstandingPaise` still ties to Debtors, so nothing flags it.
+      //
+      // Only the shortfall matters: advance still sitting unspent is removed
+      // correctly by the receipt reversal below and must not be touched twice.
+      const createdPaise = receipt.advanceCreatedPaise || 0;
+      if (createdPaise > 0) {
+        const [avail] = await JournalEntry.aggregate([
+          { $match: { societyId: new mongoose.Types.ObjectId(societyId) } },
+          { $unwind: '$lines' },
+          { $match: { 'lines.accountCode': ACCOUNT_CODES.MEMBERS_ADVANCE, 'lines.flatId': receipt.flatId } },
+          { $group: { _id: null, net: { $sum: { $subtract: ['$lines.creditPaise', '$lines.debitPaise'] } } } },
+        ]).session(session);
+        let shortfallPaise = Math.max(0, createdPaise - Math.max(0, avail?.net || 0));
+
+        // Newest first: the most recent invoice is the likeliest consumer, and
+        // unwinding it disturbs the least already-reported history.
+        const funded = shortfallPaise > 0
+          ? await MaintenanceInvoice.find({ societyId, flatId: receipt.flatId, advanceAppliedPaise: { $gt: 0 } })
+              .sort({ invoiceDate: -1, _id: -1 }).session(session)
+          : [];
+        for (const inv of funded) {
+          if (shortfallPaise <= 0) break;
+          const takePaise = Math.min(shortfallPaise, inv.advanceAppliedPaise);
+          // Undo the application: put the debt back and hand the advance back to
+          // the pool, so the receipt reversal below can remove it once, cleanly.
+          await postJournal(societyId, {
+            voucherType: 'CONTRA',
+            entryDate: new Date(),
+            narration: `Advance un-applied from ${inv.invoiceNumber} — ${reason || 'cheque bounced'}`,
+            lines: [
+              { accountCode: ACCOUNT_CODES.DEBTORS, debitPaise: takePaise, flatId: inv.flatId, description: `Advance withdrawn — ${inv.invoiceNumber}` },
+              { accountCode: ACCOUNT_CODES.MEMBERS_ADVANCE, creditPaise: takePaise, flatId: inv.flatId, description: 'Advance returned to pool' },
+            ],
+            sourceType: 'INVOICE',
+            sourceId: inv._id,
+            postedBy: actor.userId,
+            postedByName: actor.userName,
+            fyStartMonth: startMonth,
+          }, session);
+
+          inv.advanceAppliedPaise = Math.max(0, inv.advanceAppliedPaise - takePaise);
+          inv.outstandingPaise += takePaise;
+          inv.status = inv.allocatedPaise + inv.advanceAppliedPaise <= 0 ? 'ISSUED' : 'PARTIALLY_PAID';
+          await inv.save({ session });
+          shortfallPaise -= takePaise;
+        }
+      }
+
+      // A cheque that was already deposited moved Undeposited → Bank via a CONTRA.
+      // Reverse that too, or the money never leaves the bank: reversing only the
+      // receipt would leave Bank overstated and Undeposited Cheques negative —
+      // and because both postings are faithfully cached, every balance check
+      // (trial balance, drift, "balanced" on the Balance Sheet) still passes.
+      if (receipt.clearanceJournalEntryId) {
+        await reverseJournal(societyId, receipt.clearanceJournalEntryId, {
+          postedBy: actor.userId, postedByName: actor.userName, fyStartMonth: startMonth,
+          narration: `Deposit reversed — ${reason || 'cheque bounced'}`,
+        }, session);
+      }
       if (receipt.journalEntryId) {
-        const rev = await reverseJournal(societyId, receipt.journalEntryId, { postedBy: actor.userId, postedByName: actor.userName, narration: reason || 'Cheque bounced / payment reversed' }, session);
+        const rev = await reverseJournal(societyId, receipt.journalEntryId, {
+          postedBy: actor.userId, postedByName: actor.userName, fyStartMonth: startMonth,
+          narration: reason || 'Cheque bounced / payment reversed',
+        }, session);
         receipt.reversalJournalEntryId = rev._id;
       }
       receipt.status = 'BOUNCED';

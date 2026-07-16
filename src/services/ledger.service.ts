@@ -1,6 +1,7 @@
 import mongoose, { ClientSession } from 'mongoose';
 import { LedgerAccount, ILedgerAccount } from '../models/ledger-account.model';
 import { JournalEntry, VoucherType, JournalSourceType } from '../models/journal-entry.model';
+import { FinancePolicy } from '../models/finance-policy.model';
 import { getFinancialYear, formatDocNumber } from '../utils/financial-year.util';
 import { nextSequence } from './finance-sequence.service';
 
@@ -12,6 +13,8 @@ export interface PostLineInput {
   flatId?: mongoose.Types.ObjectId | string;
   vendorId?: mongoose.Types.ObjectId | string;
   fundId?: mongoose.Types.ObjectId | string;
+  /** Wing/block cost centre. Omit for anything common to the whole society. */
+  blockId?: mongoose.Types.ObjectId | string;
   description?: string;
 }
 
@@ -55,6 +58,18 @@ export async function postJournal(
   const entryDate = input.entryDate || new Date();
   const { fyString } = getFinancialYear(entryDate, input.fyStartMonth ?? 4);
 
+  // Period lock. Enforced here because postJournal is the single door every entry
+  // comes through — invoices, receipts, expenses, manual vouchers and reversals
+  // alike. Guarding the callers instead would leave a way in.
+  const locked = await FinancePolicy.findOne({ societyId }).select('lock.lockedUpToDate').lean();
+  const lockedUpTo = locked?.lock?.lockedUpToDate;
+  if (lockedUpTo && entryDate <= new Date(lockedUpTo)) {
+    throw new Error(
+      `The books are closed up to ${new Date(lockedUpTo).toLocaleDateString('en-IN')}. `
+      + `Post this entry on a later date, or reopen the period in Finance → Settings.`,
+    );
+  }
+
   // Resolve referenced accounts (by id or code) for this society.
   const codes = [...new Set(input.lines.map((l) => l.accountCode).filter(Boolean))] as string[];
   const ids = [...new Set(input.lines.map((l) => l.accountId?.toString()).filter(Boolean))] as string[];
@@ -62,7 +77,10 @@ export async function postJournal(
   if (codes.length) orClauses.push({ code: { $in: codes } });
   if (ids.length) orClauses.push({ _id: { $in: ids } });
   if (!orClauses.length) throw new Error('Journal lines must reference an account');
-  const accounts = await LedgerAccount.find({ societyId, $or: orClauses });
+  // Must read inside the caller's transaction: an account created earlier in the
+  // same txn (e.g. a fund's ledger account, minted on demand) is invisible to a
+  // sessionless read, and resolution would fail with "Ledger account not found".
+  const accounts = await LedgerAccount.find({ societyId, $or: orClauses }).session(existingSession ?? null);
   const byCode = new Map(accounts.map((a) => [a.code, a]));
   const byId = new Map(accounts.map((a) => [a._id.toString(), a]));
 
@@ -73,7 +91,7 @@ export async function postJournal(
     const credit = Math.round(l.creditPaise || 0);
     if (debit < 0 || credit < 0) throw new Error('Debit/credit cannot be negative');
     if ((debit > 0) === (credit > 0)) throw new Error('Each journal line must have exactly one of debit or credit');
-    return { acct, debit, credit, flatId: l.flatId, vendorId: l.vendorId, fundId: l.fundId, description: l.description };
+    return { acct, debit, credit, flatId: l.flatId, vendorId: l.vendorId, fundId: l.fundId, blockId: l.blockId, description: l.description };
   });
 
   if (resolved.length < 2) throw new Error('A journal entry needs at least two lines');
@@ -105,6 +123,7 @@ export async function postJournal(
         flatId: l.flatId,
         vendorId: l.vendorId,
         fundId: l.fundId,
+        blockId: l.blockId,
         description: l.description,
       })),
       totalDebitPaise: totalDebit,
@@ -144,7 +163,7 @@ export async function postJournal(
 export async function reverseJournal(
   societyId: string | mongoose.Types.ObjectId,
   entryId: string | mongoose.Types.ObjectId,
-  actor: { postedBy: string; postedByName: string; narration?: string },
+  actor: { postedBy: string; postedByName: string; narration?: string; fyStartMonth?: number },
   existingSession?: ClientSession,
 ) {
   const run = async (session: ClientSession) => {
@@ -155,6 +174,10 @@ export async function reverseJournal(
     const reversal = await postJournal(societyId, {
       voucherType: 'REVERSAL',
       entryDate: new Date(),
+      // Without this the FY would default to April, stamping the wrong
+      // financialYear and drawing the voucher number from the wrong FY sequence
+      // for any society that doesn't run an April-March year.
+      fyStartMonth: actor.fyStartMonth,
       narration: `Reversal of ${orig.voucherNumber}${actor.narration ? ` — ${actor.narration}` : ''}`,
       lines: orig.lines.map((l) => ({
         accountId: l.accountId,
@@ -163,6 +186,9 @@ export async function reverseJournal(
         flatId: l.flatId,
         vendorId: l.vendorId,
         fundId: l.fundId,
+        // Carry the wing through, or the reversal lands in "Common" while the
+        // original stays charged to the wing — overstating it forever.
+        blockId: l.blockId,
         description: l.description,
       })),
       sourceType: orig.sourceType,
@@ -189,28 +215,7 @@ export async function reverseJournal(
   }
 }
 
-export interface TrialBalanceRow {
-  code: string;
-  name: string;
-  type: string;
-  debitPaise: number;
-  creditPaise: number;
-}
-
-/**
- * Trial balance from cached account balances. A DEBIT-normal account with a
- * negative balance correctly appears in the credit column (and vice versa),
- * so the two totals always tie out for a consistent ledger.
- */
-export async function getTrialBalance(societyId: string | mongoose.Types.ObjectId) {
-  const accounts = await LedgerAccount.find({ societyId }).sort({ code: 1 }).lean<ILedgerAccount[]>();
-  const rows: TrialBalanceRow[] = accounts.map((a) => {
-    const bal = a.currentBalancePaise;
-    const debitPaise = a.normalBalance === 'DEBIT' ? Math.max(bal, 0) : Math.max(-bal, 0);
-    const creditPaise = a.normalBalance === 'CREDIT' ? Math.max(bal, 0) : Math.max(-bal, 0);
-    return { code: a.code, name: a.name, type: a.type, debitPaise, creditPaise };
-  });
-  const totalDebitPaise = rows.reduce((s, r) => s + r.debitPaise, 0);
-  const totalCreditPaise = rows.reduce((s, r) => s + r.creditPaise, 0);
-  return { rows, totalDebitPaise, totalCreditPaise, balanced: totalDebitPaise === totalCreditPaise };
-}
+// The trial balance now lives in reports.service (`trialBalance`), derived from
+// the journal rather than from cached balances — the cache is inception-to-date
+// only, so it can never answer an as-at-a-date question. It also reports cache
+// drift, which a cache-derived TB cannot detect by construction.

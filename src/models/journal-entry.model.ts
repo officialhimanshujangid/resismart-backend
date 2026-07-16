@@ -13,6 +13,14 @@ export interface IJournalLine {
   flatId?: mongoose.Types.ObjectId;
   vendorId?: mongoose.Types.ObjectId;
   fundId?: mongoose.Types.ObjectId;
+  /**
+   * Which wing this belongs to — the cost-centre dimension.
+   *
+   * Denormalised rather than joined through the flat: a shared expense has no
+   * flat at all, and a report that had to reach through one could never see the
+   * lift bill for Tower B. A line with no `blockId` is common to the society.
+   */
+  blockId?: mongoose.Types.ObjectId;
   description?: string;
 }
 
@@ -49,6 +57,7 @@ const JournalLineSchema = new Schema<IJournalLine>({
   flatId: { type: Schema.Types.ObjectId, ref: 'Flat' },
   vendorId: { type: Schema.Types.ObjectId, ref: 'Vendor' },
   fundId: { type: Schema.Types.ObjectId, ref: 'FinanceFund' },
+  blockId: { type: Schema.Types.ObjectId, ref: 'Block' },
   description: { type: String },
 }, { _id: false });
 

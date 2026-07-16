@@ -11,6 +11,7 @@ import { postJournal, PostLineInput } from './ledger.service';
 import { nextDocNumber } from './finance-sequence.service';
 import { getFinancialYear } from '../utils/financial-year.util';
 import { ACCOUNT_CODES } from './chart-of-accounts.seed';
+import { splitPayment } from './allocation.util';
 import { logger } from '../utils/logger.util';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
@@ -43,6 +44,13 @@ function computeBase(head: IChargeHead, flat: IFlat, meterUnits: number, mainten
     }
     case 'METERED':
       return head.perUnitRatePaise ? Math.round(meterUnits * head.perUnitRatePaise) : 0;
+    case 'PER_QUANTITY': {
+      // "2 cars × ₹500". The count lives on the flat under the key the head
+      // names; a flat that has no such key bills nothing rather than guessing.
+      if (!head.quantityKey || !head.perUnitRatePaise) return 0;
+      const qty = flat.quantities?.[head.quantityKey] ?? 0;
+      return Math.round(head.perUnitRatePaise * qty);
+    }
     case 'PERCENTAGE': {
       const basis = head.percentOf === 'BASE' ? runningBasePaise : maintenanceBasePaise;
       return Math.round(basis * (head.percentValue ?? 0) / 100);
@@ -52,20 +60,77 @@ function computeBase(head: IChargeHead, flat: IFlat, meterUnits: number, mainten
   }
 }
 
-function computeGst(base: number, head: IChargeHead, policy: IFinancePolicy) {
-  if (!policy.gst?.enabled || !head.gstApplicable) {
+/**
+ * How much of a member's monthly contribution is taxable, as a fraction.
+ *
+ * A resident welfare association's supply to its own members is exempt up to
+ * ₹7,500 per member per month. Beyond that the law is genuinely contested and
+ * societies follow both readings — CBIC Circular 109/28/2019 says GST applies to
+ * the whole amount, the Madras HC (Greenwood Owners Association, 2021) read that
+ * down to the excess only — so `policy.gst.exemptionBasis` decides rather than
+ * this code. Charging GST on a society that is under the limit is a real,
+ * refundable error, which is why a bare `gst.enabled` boolean was not enough.
+ *
+ * Returns 0 (fully exempt), 1 (fully taxable), or a fraction for EXCESS_ONLY.
+ */
+function taxableFraction(exemptionCountingBase: number, gstApplicableBase: number, policy: IFinancePolicy): number {
+  const limit = policy.gst?.rwaExemptionPerMemberPaise ?? 0;
+  if (limit <= 0) return 1;                              // exemption test switched off
+  if (exemptionCountingBase <= limit) return 0;          // under the limit — nothing is taxable
+  if (policy.gst?.exemptionBasis === 'EXCESS_ONLY') {
+    if (gstApplicableBase <= 0) return 0;
+    // Only the amount above the limit bears GST, spread across the taxable heads.
+    return Math.min(1, (exemptionCountingBase - limit) / gstApplicableBase);
+  }
+  return 1;                                              // FULL_IF_EXCEEDS
+}
+
+/**
+ * GST on a charge line. Always CGST+SGST, never IGST — and that is correct, not
+ * an oversight: the place of supply for services relating to immovable property
+ * is the property's own location (IGST Act s.12(3)), and a society's members
+ * occupy that very property. The supply is therefore always intra-state.
+ * `policy.gst.placeOfSupplyState` exists for GSTR reporting, not to switch this.
+ */
+function computeGst(base: number, head: IChargeHead, policy: IFinancePolicy, fraction: number) {
+  if (!policy.gst?.enabled || !head.gstApplicable || fraction <= 0) {
     return { rate: 0, gst: 0, cgst: 0, sgst: 0, igst: 0, sac: head.sacCode };
   }
   const rate = head.gstRatePercent ?? policy.gst.defaultRatePercent;
-  const gst = Math.round(base * rate / 100);
+  const gst = Math.round((base * fraction) * rate / 100);
   const cgst = Math.round(gst / 2);
   return { rate, gst, cgst, sgst: gst - cgst, igst: 0, sac: head.sacCode || policy.gst.defaultSac };
 }
 
-function computeInterest(arrearsPaise: number, policy: IFinancePolicy, maxDaysOverdue: number): number {
+/**
+ * Who the invoice is addressed to.
+ *
+ * Honours each charge head's `billTo`, which used to be saved, shown in the UI,
+ * and then ignored here in favour of the flat's status alone. The member (owner)
+ * is liable for anything billed to OWNER, so a single owner-billed head puts the
+ * whole invoice on the owner; a rented flat bills the tenant only when every
+ * applied head is occupant-billed.
+ */
+function resolveBillToRole(flat: IFlat, appliedHeads: IChargeHead[]): 'OWNER' | 'TENANT' {
+  if (flat.status !== 'RENTED') return 'OWNER';
+  if (!appliedHeads.length) return 'OWNER';
+  return appliedHeads.every((h) => h.billTo === 'OCCUPANT') ? 'TENANT' : 'OWNER';
+}
+
+/**
+ * Interest on overdue dues.
+ *
+ * `base` is chosen by the caller from `lateFee.compounding`: SIMPLE charges on
+ * unpaid principal only, COMPOUND on the whole arrears including interest already
+ * levied. That switch was declared, validated and shown in Settings but never
+ * read here — so the engine charged on total arrears either way and compounded
+ * silently, while bye-laws commonly cap interest at 21% per annum SIMPLE.
+ */
+function computeInterest(base: number, policy: IFinancePolicy, maxDaysOverdue: number): number {
   const lf = policy.lateFee;
-  if (!lf?.enabled || arrearsPaise <= 0) return 0;
+  if (!lf?.enabled || base <= 0) return 0;
   if (maxDaysOverdue <= (lf.graceDays || 0)) return 0;
+  const arrearsPaise = base;
   let interest = 0;
   switch (lf.mode) {
     case 'FLAT': interest = lf.flatAmountPaise || 0; break;
@@ -91,20 +156,27 @@ function applyRounding(amountPaise: number, policy: IFinancePolicy): number {
 }
 
 /** Sum of outstanding on prior open invoices + oldest overdue due-date, for arrears & interest. */
-async function getFlatArrears(societyId: string, flatId: any): Promise<{ arrearsPaise: number; maxDaysOverdue: number }> {
+async function getFlatArrears(societyId: string, flatId: any): Promise<{ arrearsPaise: number; principalArrearsPaise: number; maxDaysOverdue: number }> {
   const open = await MaintenanceInvoice.find({
     societyId: oid(societyId),
     flatId,
     status: { $in: ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] },
-  }).select('outstandingPaise dueDate').lean();
+  }).select('outstandingPaise interestOutstandingPaise dueDate').lean();
   const arrearsPaise = open.reduce((s, i) => s + (i.outstandingPaise || 0), 0);
+  // What the member owes excluding penalty already levied. Charging interest on
+  // the full arrears means charging interest on interest — compounding, whatever
+  // the policy says.
+  const principalArrearsPaise = open.reduce(
+    (s, i) => s + Math.max(0, (i.outstandingPaise || 0) - (i.interestOutstandingPaise || 0)),
+    0,
+  );
   const now = Date.now();
   const maxDaysOverdue = open.reduce((max, i) => {
     if (!i.dueDate) return max;
     const d = Math.floor((now - new Date(i.dueDate).getTime()) / 86400000);
     return Math.max(max, d);
   }, 0);
-  return { arrearsPaise, maxDaysOverdue };
+  return { arrearsPaise, principalArrearsPaise, maxDaysOverdue };
 }
 
 /** Members' Advance credit balance for a flat (from the GL), for auto-apply. */
@@ -162,7 +234,14 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
 
   // Active charge heads (optionally filtered), sorted so PERCENTAGE heads run last.
   let headQuery: any = { societyId, isActive: true };
-  if (opts.chargeHeadIds?.length) headQuery._id = { $in: opts.chargeHeadIds };
+  if (opts.chargeHeadIds?.length) {
+    // An explicit selection is deliberate — honour it, including one-time levies.
+    headQuery._id = { $in: opts.chargeHeadIds };
+  } else {
+    // Otherwise bill recurring heads only. `isRecurring` used to be ignored here,
+    // so a one-time levy was re-billed every single month.
+    headQuery.isRecurring = { $ne: false };
+  }
   const heads = (await ChargeHead.find(headQuery).lean<IChargeHead[]>())
     .sort((a, b) => (a.pricingMode === 'PERCENTAGE' ? 1 : 0) - (b.pricingMode === 'PERCENTAGE' ? 1 : 0) || a.sortOrder - b.sortOrder);
   if (!heads.length) return { period, created: 0, skipped: 0, totalBilledPaise: 0, errors: ['No active charge heads'] };
@@ -198,22 +277,39 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
       const meterByHead = new Map(meterReadings.map((m) => [m.chargeHeadId.toString(), m.unitsConsumed]));
 
       const lineItems: IInvoiceLineItem[] = [];
+      const appliedHeads: IChargeHead[] = [];
       let maintenanceBasePaise = 0;
       let runningBasePaise = 0;
       let subTotalPaise = 0;
       let gstTotalPaise = 0;
 
+      // First pass: every base amount. GST can't be decided line by line — the
+      // ₹7,500 exemption is tested against the member's WHOLE monthly
+      // contribution, so all the bases have to be known before any of them
+      // can be taxed.
+      const priced: { head: IChargeHead; base: number; meterUnits: number }[] = [];
       for (const head of heads) {
         if (!isApplicable(head, flat)) continue;
         const meterUnits = meterByHead.get((head._id as any).toString()) || 0;
         const base = computeBase(head, flat, meterUnits, maintenanceBasePaise, runningBasePaise);
         if (base <= 0) continue;
-
-        const gst = computeGst(base, head, policy);
         if (head.category === 'MAINTENANCE') maintenanceBasePaise += base;
         runningBasePaise += base;
+        priced.push({ head, base, meterUnits });
+      }
+
+      const exemptionCountingBase = priced
+        .filter(p => p.head.countsTowardRwaExemption !== false)
+        .reduce((s, p) => s + p.base, 0);
+      const gstApplicableBase = priced.filter(p => p.head.gstApplicable).reduce((s, p) => s + p.base, 0);
+      const fraction = taxableFraction(exemptionCountingBase, gstApplicableBase, policy);
+
+      // Second pass: the lines themselves, now that the exemption is known.
+      for (const { head, base, meterUnits } of priced) {
+        const gst = computeGst(base, head, policy, fraction);
         subTotalPaise += base;
         gstTotalPaise += gst.gst;
+        appliedHeads.push(head);
 
         lineItems.push({
           chargeHeadId: head._id as any,
@@ -239,8 +335,11 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
       }
 
       // Arrears + interest
-      const { arrearsPaise, maxDaysOverdue } = await getFlatArrears(societyId, flat._id);
-      const interestPaise = computeInterest(arrearsPaise, policy, maxDaysOverdue);
+      const { arrearsPaise, principalArrearsPaise, maxDaysOverdue } = await getFlatArrears(societyId, flat._id);
+      // The one place `compounding` decides anything: simple interest is charged
+      // on unpaid dues only, compound on dues plus the interest already levied.
+      const interestBasePaise = policy.lateFee?.compounding === 'COMPOUND' ? arrearsPaise : principalArrearsPaise;
+      const interestPaise = computeInterest(interestBasePaise, policy, maxDaysOverdue);
       if (interestPaise > 0) {
         lineItems.push({
           code: 'INT', name: 'Interest on Arrears', category: 'INTEREST',
@@ -281,14 +380,19 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
 
       // Build the balanced INVOICE journal for current-period charges (arrears excluded).
       const jlines: PostLineInput[] = [];
+      const blockId = flat.blockId; // wing cost centre — every line of this bill belongs to it
       for (const li of lineItems) {
         if (!li.isPostable) continue;
-        jlines.push({ accountCode: li.incomeAccountCode!, creditPaise: li.baseAmountPaise, flatId: flat._id, fundId: li.fundId, description: li.name });
+        jlines.push({ accountCode: li.incomeAccountCode!, creditPaise: li.baseAmountPaise, flatId: flat._id, fundId: li.fundId, blockId, description: li.name });
       }
-      if (gstTotalPaise > 0) jlines.push({ accountCode: ACCOUNT_CODES.GST_OUTPUT, creditPaise: gstTotalPaise, flatId: flat._id, description: 'GST output' });
-      if (roundingPaise > 0) jlines.push({ accountCode: ACCOUNT_CODES.ROUNDING_OFF, creditPaise: roundingPaise, flatId: flat._id, description: 'Rounding off' });
-      if (roundingPaise < 0) jlines.push({ accountCode: ACCOUNT_CODES.ROUNDING_OFF, debitPaise: -roundingPaise, flatId: flat._id, description: 'Rounding off' });
-      jlines.push({ accountCode: ACCOUNT_CODES.DEBTORS, debitPaise: totalPaise, flatId: flat._id, description: `Invoice ${period}` });
+      if (gstTotalPaise > 0) jlines.push({ accountCode: ACCOUNT_CODES.GST_OUTPUT, creditPaise: gstTotalPaise, flatId: flat._id, blockId, description: 'GST output' });
+      // Honour the configured account. It defaults to 4900, which is why this
+      // reading as hard-coded went unnoticed — the default matched the constant,
+      // so changing it in Settings silently did nothing.
+      const roundingCode = policy.rounding?.accountCode || ACCOUNT_CODES.ROUNDING_OFF;
+      if (roundingPaise > 0) jlines.push({ accountCode: roundingCode, creditPaise: roundingPaise, flatId: flat._id, blockId, description: 'Rounding off' });
+      if (roundingPaise < 0) jlines.push({ accountCode: roundingCode, debitPaise: -roundingPaise, flatId: flat._id, blockId, description: 'Rounding off' });
+      jlines.push({ accountCode: ACCOUNT_CODES.DEBTORS, debitPaise: totalPaise, flatId: flat._id, blockId, description: `Invoice ${period}` });
 
       const session = await mongoose.startSession();
       try {
@@ -308,7 +412,7 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
             flatSizeLabel: flat.size ? sizeLabelById.get(flat.size.toString()) : undefined,
             primaryOwnerUserId: flat.ownerUserId,
             primaryOwnerName: flat.ownerUserId ? ownerNameById.get(flat.ownerUserId.toString()) : undefined,
-            billToRole: flat.status === 'RENTED' ? 'TENANT' : 'OWNER',
+            billToRole: resolveBillToRole(flat, appliedHeads),
             invoiceNumber,
             financialYear: fyString,
             billingPeriod: period,
@@ -328,6 +432,12 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
             advanceAppliedPaise,
             waivedPaise: 0,
             outstandingPaise,
+            // An advance applied at issue settles the bill exactly as a payment
+            // would, so it follows the same appropriation order.
+            interestOutstandingPaise: interestPaise - splitPayment(
+              policy.allocation?.interestOrder || 'PRINCIPAL_FIRST',
+              advanceAppliedPaise, totalPaise, interestPaise,
+            ).toInterestPaise,
             status: 'ISSUED',
             generatedBy: opts.triggeredByUserId ? 'MANUAL' : 'CRON',
             generatedByUserId: opts.triggeredByUserId,
@@ -356,8 +466,8 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
               entryDate: invoiceDate,
               narration: `Advance adjusted against ${invoiceNumber}`,
               lines: [
-                { accountCode: ACCOUNT_CODES.MEMBERS_ADVANCE, debitPaise: advanceAppliedPaise, flatId: flat._id },
-                { accountCode: ACCOUNT_CODES.DEBTORS, creditPaise: advanceAppliedPaise, flatId: flat._id },
+                { accountCode: ACCOUNT_CODES.MEMBERS_ADVANCE, debitPaise: advanceAppliedPaise, flatId: flat._id, blockId },
+                { accountCode: ACCOUNT_CODES.DEBTORS, creditPaise: advanceAppliedPaise, flatId: flat._id, blockId },
               ],
               sourceType: 'INVOICE',
               sourceId: invoice._id,

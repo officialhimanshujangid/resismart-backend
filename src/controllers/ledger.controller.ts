@@ -1,8 +1,11 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { LedgerAccount } from '../models/ledger-account.model';
+import * as accounts from '../services/chart-of-accounts.service';
+import { AccountError } from '../services/chart-of-accounts.service';
 import { JournalEntry } from '../models/journal-entry.model';
-import { postJournal, getTrialBalance } from '../services/ledger.service';
+import { postJournal } from '../services/ledger.service';
+import { trialBalance } from '../services/reports.service';
 import { seedChartOfAccounts } from '../services/chart-of-accounts.seed';
 
 /** GET /finance/society/ledger/accounts — the chart of accounts. */
@@ -38,6 +41,30 @@ export const seedAccounts = async (req: Request, res: Response): Promise<void> =
   }
 };
 
+/** Map an AccountError's status through; anything else is ours, not the caller's. */
+const accountHandler = (fn: (societyId: string, req: Request) => Promise<unknown>) =>
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const societyId = req.user?.activeTenantId;
+      if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
+      res.json(await fn(societyId, req));
+    } catch (e: any) {
+      res.status(e instanceof AccountError ? e.status : 400).json({ error: e.message });
+    }
+  };
+
+/** POST /finance/society/ledger/accounts — add an account to the chart. */
+export const createAccount = accountHandler((societyId, req) =>
+  accounts.createAccount(societyId, req.body, { userId: req.user!.userId, userName: req.user!.userName || 'Admin' }));
+
+/** PUT /finance/society/ledger/accounts/:id — rename / re-parent / deactivate. */
+export const updateAccount = accountHandler((societyId, req) =>
+  accounts.updateAccount(societyId, String(req.params.id), req.body));
+
+/** DELETE /finance/society/ledger/accounts/:id — only if it was never used. */
+export const deleteAccount = accountHandler((societyId, req) =>
+  accounts.deleteAccount(societyId, String(req.params.id)));
+
 /** GET /finance/society/ledger/journal — paginated journal (voucher) list. */
 export const listJournal = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -71,13 +98,13 @@ export const listJournal = async (req: Request, res: Response): Promise<void> =>
   }
 };
 
-/** GET /finance/society/ledger/trial-balance */
+/** GET /finance/society/ledger/trial-balance — same journal-derived TB as /reports/trial-balance. */
 export const getTrialBalanceController = async (req: Request, res: Response): Promise<void> => {
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
 
-    const tb = await getTrialBalance(societyId);
+    const tb = await trialBalance(societyId, { asOf: (req.query as any).asOf });
     res.json(tb);
   } catch (error: any) {
     res.status(500).json({ error: error.message });

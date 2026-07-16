@@ -10,16 +10,22 @@ export type FundCategory =
   | 'MAINTENANCE_POOL'
   | 'OPENING_BALANCE';
 
+/**
+ * A fund master: the name, purpose and target of a reserve. It deliberately holds
+ * NO balance — the money lives in the 1:1 `ledgerAccountId` FUND account and is
+ * derived from posted journals (see `funds.service.listFunds`). A stored copy
+ * here is what previously let two same-category cards mirror one account and
+ * double-count the society's reserves.
+ */
 export interface IFinanceFund extends Document {
   societyId: mongoose.Types.ObjectId;
   name: string;
   description?: string;
   category: FundCategory;
-  currentBalancePaise: number;
   targetAmountPaise: number;
   isInvested: boolean;
   isActive: boolean;
-  // Reserved for Phase 6 (ledger-backed funds): 1:1 link to a FUND LedgerAccount.
+  /** 1:1 backing FUND LedgerAccount. Created with the fund; the money is here. */
   ledgerAccountId?: mongoose.Types.ObjectId;
   createdBy: mongoose.Types.ObjectId;
   createdByName: string;
@@ -37,7 +43,6 @@ const FinanceFundSchema = new Schema<IFinanceFund>({
     required: true,
     default: 'GENERAL',
   },
-  currentBalancePaise: { type: Number, required: true, default: 0 },
   targetAmountPaise: { type: Number, default: 0, min: 0 },
   isInvested: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },

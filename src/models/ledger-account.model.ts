@@ -2,9 +2,19 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export type AccountType = 'ASSET' | 'LIABILITY' | 'INCOME' | 'EXPENSE' | 'FUND' | 'EQUITY';
 export type NormalBalance = 'DEBIT' | 'CREDIT';
-export type SubLedgerDimension = 'FLAT' | 'VENDOR';
+export type SubLedgerDimension = 'FLAT' | 'VENDOR' | 'BLOCK';
+/**
+ * Whether income is covered by the principle of mutuality. Contributions from
+ * members to their own society are not taxable income; what the society earns
+ * from outside it (bank interest, tower rent) is. Drives the ITR-5 position.
+ */
+export type Taxability = 'MUTUAL' | 'TAXABLE';
 
-/** Debit-normal for assets/expenses; credit-normal for everything else. */
+/**
+ * The usual side for a type. Contra accounts (e.g. Accumulated Depreciation, an
+ * ASSET carrying a CREDIT balance) override this — which is why `normalBalance`
+ * is a stored field rather than derived at read time.
+ */
 export function normalBalanceForType(type: AccountType): NormalBalance {
   return type === 'ASSET' || type === 'EXPENSE' ? 'DEBIT' : 'CREDIT';
 }
@@ -18,10 +28,14 @@ export interface ILedgerAccount extends Document {
   isControlAccount: boolean;
   subLedgerDimension?: SubLedgerDimension;
   fundId?: mongoose.Types.ObjectId;
+  /** Groups this account under a heading for Balance Sheet schedules. */
   parentAccountId?: mongoose.Types.ObjectId;
+  /** INCOME accounts only — mutual (not taxable) vs taxable. */
+  taxability?: Taxability;
   isSystem: boolean;
   isActive: boolean;
-  openingBalancePaise: number;
+  // No openingBalancePaise: an opening balance is a posted OPENING voucher like
+  // any other entry, not a field. The old field was never read or written.
   currentBalancePaise: number; // signed in the account's normal direction; recomputed from journal
   createdBy?: mongoose.Types.ObjectId;
   createdByName?: string;
@@ -36,12 +50,12 @@ const LedgerAccountSchema = new Schema<ILedgerAccount>({
   type: { type: String, enum: ['ASSET', 'LIABILITY', 'INCOME', 'EXPENSE', 'FUND', 'EQUITY'], required: true },
   normalBalance: { type: String, enum: ['DEBIT', 'CREDIT'], required: true },
   isControlAccount: { type: Boolean, default: false },
-  subLedgerDimension: { type: String, enum: ['FLAT', 'VENDOR'] },
+  subLedgerDimension: { type: String, enum: ['FLAT', 'VENDOR', 'BLOCK'] },
   fundId: { type: Schema.Types.ObjectId, ref: 'FinanceFund' },
   parentAccountId: { type: Schema.Types.ObjectId, ref: 'LedgerAccount' },
+  taxability: { type: String, enum: ['MUTUAL', 'TAXABLE'] },
   isSystem: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
-  openingBalancePaise: { type: Number, default: 0 },
   currentBalancePaise: { type: Number, default: 0 },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
   createdByName: { type: String },

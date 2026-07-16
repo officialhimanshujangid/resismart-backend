@@ -47,7 +47,19 @@ export const getMyOutstanding = async (req: Request, res: Response): Promise<voi
     const legacy = await SocietyFinanceSettings.findOne({ societyId }).select('upiId').lean();
     let onlineEnabled = false;
     try { onlineEnabled = (await resolveGateway(societyId)).online; } catch { onlineEnabled = false; }
-    res.json({ totalOutstandingPaise, advanceBalancePaise: Math.max(0, adv[0]?.net || 0), openInvoices: open, onlineEnabled, upiId: policy?.settlement?.upiId || legacy?.upiId });
+    const [society, flat] = await Promise.all([
+      Society.findById(societyId).select('name').lean(),
+      Flat.findById(flatId).select('blockName number').lean(),
+    ]);
+    res.json({
+      totalOutstandingPaise,
+      advanceBalancePaise: Math.max(0, adv[0]?.net || 0),
+      openInvoices: open,
+      onlineEnabled,
+      upiId: policy?.settlement?.upiId || legacy?.upiId,
+      upiPayeeName: society?.name,
+      flatLabel: flat ? `${flat.blockName} ${flat.number}`.trim() : undefined,
+    });
   } catch (error: any) { res.status(500).json({ error: error.message }); }
 };
 

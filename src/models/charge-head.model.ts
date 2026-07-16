@@ -5,7 +5,7 @@ export type ChargeCategory =
   | 'WATER' | 'PARKING' | 'FESTIVAL' | 'NON_OCCUPANCY'
   | 'UTILITY' | 'ADHOC' | 'OTHER';
 
-export type PricingMode = 'UNIFORM' | 'PER_FLAT_SIZE' | 'PER_SQFT' | 'METERED' | 'PERCENTAGE' | 'FLAT_ADHOC';
+export type PricingMode = 'UNIFORM' | 'PER_FLAT_SIZE' | 'PER_SQFT' | 'METERED' | 'PERCENTAGE' | 'FLAT_ADHOC' | 'PER_QUANTITY';
 export type Occupancy = 'ALL' | 'OWNER_OCCUPIED' | 'RENTED' | 'VACANT';
 export type BillTo = 'OWNER' | 'OCCUPANT';
 
@@ -21,8 +21,15 @@ export interface IChargeHead extends Document {
   perSizeAmounts?: { flatSizeId: mongoose.Types.ObjectId; label: string; amountPaise: number }[];
   ratePerSqftPaise?: number;              // PER_SQFT (uses Flat.carpetAreaSqft)
   areaBasis?: 'CARPET' | 'BUILTUP';
-  perUnitRatePaise?: number;              // METERED
+  perUnitRatePaise?: number;              // METERED and PER_QUANTITY — the rate for one of whatever is counted
   meterType?: string;
+  /**
+   * PER_QUANTITY — which key of `Flat.quantities` this head bills, e.g.
+   * 'parkingSlots' to charge "2 cars × ₹500". A free-form key rather than a
+   * column per idea, so a society can bill anything countable without a schema
+   * change. A flat that has no such key bills nothing.
+   */
+  quantityKey?: string;
   percentOf?: 'MAINTENANCE' | 'BASE';     // PERCENTAGE — of the maintenance line or of the running base
   percentValue?: number;
 
@@ -40,6 +47,13 @@ export interface IChargeHead extends Document {
   fundId?: mongoose.Types.ObjectId;           // when this head feeds a fund
 
   gstApplicable: boolean;
+  /**
+   * Whether this head counts toward the ₹7,500/member/month GST exemption test.
+   * Property tax and common-area electricity collected as a pure reimbursement
+   * are excluded from the computation, so they must not push a society over the
+   * limit. Defaults to true — most heads do count.
+   */
+  countsTowardRwaExemption?: boolean;
   gstRatePercent?: number;
   sacCode?: string;
 
@@ -64,7 +78,7 @@ const ChargeHeadSchema = new Schema<IChargeHead>({
     required: true,
   },
 
-  pricingMode: { type: String, enum: ['UNIFORM', 'PER_FLAT_SIZE', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC'], required: true },
+  pricingMode: { type: String, enum: ['UNIFORM', 'PER_FLAT_SIZE', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC', 'PER_QUANTITY'], required: true },
   uniformAmountPaise: { type: Number, min: 0 },
   perSizeAmounts: [{
     flatSizeId: { type: Schema.Types.ObjectId, ref: 'FlatSize', required: true },
@@ -75,6 +89,7 @@ const ChargeHeadSchema = new Schema<IChargeHead>({
   areaBasis: { type: String, enum: ['CARPET', 'BUILTUP'], default: 'CARPET' },
   perUnitRatePaise: { type: Number, min: 0 },
   meterType: { type: String },
+  quantityKey: { type: String, trim: true },
   percentOf: { type: String, enum: ['MAINTENANCE', 'BASE'] },
   percentValue: { type: Number, min: 0 },
 
@@ -91,6 +106,7 @@ const ChargeHeadSchema = new Schema<IChargeHead>({
   fundId: { type: Schema.Types.ObjectId, ref: 'FinanceFund' },
 
   gstApplicable: { type: Boolean, default: false },
+  countsTowardRwaExemption: { type: Boolean, default: true },
   gstRatePercent: { type: Number, min: 0 },
   sacCode: { type: String },
 

@@ -8,7 +8,7 @@ import { FinanceFund } from '../models/finance-fund.model';
 import mongoose from 'mongoose';
 import FinanceNotificationService from '../services/finance-notification.service';
 import { User } from '../models/user.model';
-import { reconcileSocietyFunds } from '../services/funds.service';
+import { listFunds, createFund as createFundWithAccount } from '../services/funds.service';
 
 export const getSettings = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -335,25 +335,14 @@ export const rejectOfflinePayment = async (req: Request, res: Response): Promise
   }
 };
 
+const fundActor = (req: Request) => ({ userId: req.user!.userId, userName: req.user!.userName || 'Admin' });
+
 export const getFunds = async (req: Request, res: Response): Promise<void> => {
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
 
-    const funds = await FinanceFund.find({ societyId }).sort({ currentBalancePaise: -1 });
-    res.json(funds);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-};
-
-export const reconcileFundsController = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const societyId = req.user?.activeTenantId;
-    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
-    const result = await reconcileSocietyFunds(societyId);
-    const funds = await FinanceFund.find({ societyId }).sort({ currentBalancePaise: -1 });
-    res.json({ ...result, funds });
+    res.json(await listFunds(societyId, fundActor(req)));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -367,17 +356,13 @@ export const createFund = async (req: Request, res: Response): Promise<void> => 
     const { name, category, description, targetAmountPaise, isInvested } = req.body;
 
     try {
-      const fund = await FinanceFund.create({
+      // Creates the fund together with its own backing FUND ledger account, so it
+      // is collectable the moment it exists.
+      const fund = await createFundWithAccount(
         societyId,
-        name,
-        category,
-        description,
-        targetAmountPaise: targetAmountPaise || 0,
-        isInvested: Boolean(isInvested),
-        currentBalancePaise: 0,
-        createdBy: req.user!.userId,
-        createdByName: req.user!.userName || 'Admin',
-      });
+        { name, category, description, targetAmountPaise, isInvested },
+        fundActor(req),
+      );
       res.json(fund);
     } catch (e: any) {
       if (e.code === 11000) {

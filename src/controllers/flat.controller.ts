@@ -238,6 +238,7 @@ export const updateFlat = async (req: Request, res: Response, next: NextFunction
     const oldValues = {
       status: flat.status,
       fullAddress: flat.fullAddress,
+      quantities: flat.quantities,
     };
 
     if (validatedData.status) flat.status = validatedData.status as FlatStatus;
@@ -256,6 +257,14 @@ export const updateFlat = async (req: Request, res: Response, next: NextFunction
 
     if (validatedData.latitude && validatedData.longitude) {
       flat.location = { type: 'Point', coordinates: [validatedData.longitude, validatedData.latitude] };
+    }
+
+    // Counts a PER_QUANTITY charge head bills against, e.g. { parkingSlots: 2 }.
+    // Sent whole, so dropping a key here is how a count is removed; a zero is
+    // kept, because "explicitly none" and "never recorded" bill the same but
+    // read very differently to whoever checks the register next.
+    if (validatedData.quantities !== undefined) {
+      flat.quantities = validatedData.quantities;
     }
 
     flat.updatedBy = new mongoose.Types.ObjectId(userId);

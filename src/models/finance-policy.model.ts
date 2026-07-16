@@ -13,7 +13,9 @@ export interface INumberingRule {
 export interface IFinancePolicy extends Document {
   societyId: mongoose.Types.ObjectId;
 
-  financialYear: { startMonth: number; startDay: number };
+  // No `startDay`: `getFinancialYear` starts every FY on the 1st, and a stored
+  // day it silently ignored was a promise the engine never kept.
+  financialYear: { startMonth: number };
   gstin?: string;
   pan?: string;
 
@@ -55,10 +57,29 @@ export interface IFinancePolicy extends Document {
     defaultRatePercent: number;
     defaultSac: string;
     placeOfSupplyState?: string;
+    /**
+     * RWA exemption: monthly contribution per member up to this is exempt
+     * (₹7,500 under Notification 12/2017-CT(R) as amended). 0 disables the test.
+     */
+    rwaExemptionPerMemberPaise: number;
+    /**
+     * What happens once a member's contribution breaches the exemption. The law
+     * is genuinely contested and societies follow both readings, so this is a
+     * setting rather than a hard-coded assumption:
+     *  - FULL_IF_EXCEEDS: GST on the whole amount (CBIC Circular 109/28/2019)
+     *  - EXCESS_ONLY:     GST only on the amount above the limit (Madras HC,
+     *                     Greenwood Owners Association, 2021 — which read down
+     *                     the circular; the department appealed)
+     */
+    exemptionBasis: 'FULL_IF_EXCEEDS' | 'EXCESS_ONLY';
+    /** Below this annual turnover a society need not register at all (₹20 lakh). */
+    registrationThresholdPaise: number;
   };
 
   tds: {
     enabled: boolean;
+    /** Unset = nobody ever chose; see the schema note. */
+    configured?: boolean;
     defaultSection?: string;
     defaultRatePercent?: number;
   };
@@ -85,10 +106,43 @@ export interface IFinancePolicy extends Document {
       accountNumberEnc?: string; accountNumberIv?: string; accountNumberTag?: string;
       last4?: string; ifsc?: string; bankName?: string;
     };
-    payoutFundAccountId?: string;
   };
 
   advance: { autoApply: boolean };
+
+  /**
+   * How a payment is appropriated within a bill it doesn't cover in full.
+   *
+   * Money always goes to the oldest bill first; this decides what it settles
+   * inside that bill. Bye-laws commonly require the member's dues to be cleared
+   * before the penalty, which also stops interest being levied on interest —
+   * hence the default. Lenders conventionally do the reverse.
+   */
+  allocation: { interestOrder: 'PRINCIPAL_FIRST' | 'INTEREST_FIRST' };
+
+  /**
+   * Early-payment rebate. Many societies knock a few percent off for a member who
+   * settles the year up front. Only ever a suggestion the committee applies — the
+   * rebate posts as an explicit adjustment, never silently at allocation time,
+   * because a discount nobody approved is a discount nobody can explain.
+   */
+  rebate: { enabled: boolean; percent: number; withinDays: number };
+
+  /**
+   * Which optional parts of the finance module this society uses. Visibility
+   * only — nothing here changes what posts or what is billed, so a society can
+   * switch one on years later and find its screen exactly where it left it.
+   * Unset means "never chosen": `finance-modules.service` decides once from the
+   * society's own data rather than hiding screens somebody is already using.
+   */
+  modules?: string[];
+
+  /**
+   * Books closed up to and including this date. Once a year is audited and
+   * presented at the AGM, a back-dated entry would silently restate figures the
+   * members have already been given. Enforced in `postJournal`.
+   */
+  lock: { lockedUpToDate?: Date; lockedBy?: mongoose.Types.ObjectId; lockedByName?: string; lockedAt?: Date };
 
   createdBy: mongoose.Types.ObjectId;
   createdByName: string;
@@ -109,7 +163,6 @@ const FinancePolicySchema = new Schema<IFinancePolicy>({
 
   financialYear: {
     startMonth: { type: Number, min: 1, max: 12, default: 4 },
-    startDay: { type: Number, min: 1, max: 28, default: 1 },
   },
   gstin: { type: String, trim: true },
   pan: { type: String, trim: true },
@@ -152,10 +205,24 @@ const FinancePolicySchema = new Schema<IFinancePolicy>({
     defaultRatePercent: { type: Number, default: 18 },
     defaultSac: { type: String, default: '9995' },
     placeOfSupplyState: { type: String },
+    rwaExemptionPerMemberPaise: { type: Number, default: 750000 },   // ₹7,500/month
+    exemptionBasis: { type: String, enum: ['FULL_IF_EXCEEDS', 'EXCESS_ONLY'], default: 'FULL_IF_EXCEEDS' },
+    registrationThresholdPaise: { type: Number, default: 200000000 }, // ₹20 lakh/year
   },
 
   tds: {
     enabled: { type: Boolean, default: false },
+    // Whether anyone has ever actually answered the question above.
+    //
+    // `enabled` has always defaulted to false while the engine ignored it and
+    // deducted from per-vendor settings regardless. So a stored `false` cannot
+    // be read as "this society chose no TDS" — it is far more likely nobody was
+    // ever asked. Honouring it as a decision would silently stop deduction for
+    // societies that had it working, which is statutory under-deduction. This
+    // marker keeps "never chosen" distinguishable from "chosen off", exactly as
+    // `modules` does; `resolveTdsEnabled` infers the answer once from the
+    // society's own vendors and writes it down.
+    configured: { type: Boolean },
     defaultSection: { type: String },
     defaultRatePercent: { type: Number },
   },
@@ -185,10 +252,30 @@ const FinancePolicySchema = new Schema<IFinancePolicy>({
       accountNumberEnc: { type: String }, accountNumberIv: { type: String }, accountNumberTag: { type: String },
       last4: { type: String }, ifsc: { type: String, trim: true }, bankName: { type: String, trim: true },
     },
-    payoutFundAccountId: { type: String },
   },
 
   advance: { autoApply: { type: Boolean, default: true } },
+
+  allocation: {
+    interestOrder: { type: String, enum: ['PRINCIPAL_FIRST', 'INTEREST_FIRST'], default: 'PRINCIPAL_FIRST' },
+  },
+
+  rebate: {
+    enabled: { type: Boolean, default: false },
+    percent: { type: Number, default: 5, min: 0, max: 100 },
+    withinDays: { type: Number, default: 15, min: 0 },
+  },
+
+  // No default: "unset" and "none chosen" must stay distinguishable, or an
+  // existing society would have its screens hidden the day this shipped.
+  modules: { type: [String] },
+
+  lock: {
+    lockedUpToDate: { type: Date },
+    lockedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    lockedByName: { type: String },
+    lockedAt: { type: Date },
+  },
 
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   createdByName: { type: String, required: true },

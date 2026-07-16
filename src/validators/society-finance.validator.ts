@@ -65,6 +65,110 @@ export const rejectOfflinePaymentSchema = z.object({
 
 const objectId = /^[0-9a-fA-F]{24}$/;
 
+export const createAccountSchema = z.object({
+  code: z.string().min(1).max(10).regex(/^[0-9]+$/, 'Account code must be numeric'),
+  name: z.string().min(1).max(120),
+  type: z.enum(['ASSET', 'LIABILITY', 'INCOME', 'EXPENSE', 'FUND', 'EQUITY']),
+  isControlAccount: z.boolean().optional(),
+  parentAccountId: z.string().regex(objectId).optional(),
+});
+
+export const updateAccountSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  isActive: z.boolean().optional(),
+  parentAccountId: z.union([z.string().regex(objectId), z.literal('')]).nullable().optional(),
+});
+
+export const issueSharesSchema = z.object({
+  flatId: z.string().regex(objectId, 'Invalid flat id'),
+  memberName: z.string().min(1).max(120),
+  memberUserId: z.string().regex(objectId).optional(),
+  shareCount: z.number().int().min(1).max(10000),
+  faceValuePaise: z.number().int().min(0),
+  issuedOn: z.string().optional(),
+  receivedIn: z.enum(['BANK', 'CASH']).optional(),
+});
+
+export const transferSharesSchema = z.object({
+  toMemberName: z.string().min(1).max(120),
+  toMemberUserId: z.string().regex(objectId).optional(),
+  transferredOn: z.string().optional(),
+});
+
+// ---- Phase D: defaulter notices & recovery ----
+
+/**
+ * `stage` is optional: the service works out the next one due, and it is the
+ * service — not this schema — that refuses a stage which skips a step. Zod can
+ * see the shape of one request; only the service can see what has been served.
+ */
+export const issueNoticeSchema = z.object({
+  flatId: z.string().regex(objectId, 'Invalid flat id'),
+  stage: z.enum(['FIRST', 'SECOND', 'FINAL', 'RECOVERY_101']).optional(),
+  issuedOn: z.string().optional(),
+  dueByOn: z.string().optional(),
+  deliveredVia: z.array(z.enum(['EMAIL', 'HAND', 'POST'])).optional(),
+  notes: z.string().max(1000).optional(),
+  recoveryRef: z.string().max(120).optional(),
+});
+
+export const resolveNoticeSchema = z.object({
+  resolvedOn: z.string().optional(),
+  notes: z.string().max(1000).optional(),
+});
+
+// ---- Phase D: post-dated cheque register ----
+
+export const registerPdcSchema = z.object({
+  flatId: z.string().regex(objectId, 'Invalid flat id').optional(),
+  payerName: z.string().min(1, 'Who is the cheque from?').max(120),
+  chequeNo: z.string().min(1, 'Cheque number is required').max(30),
+  bankName: z.string().min(1, 'Which bank is it drawn on?').max(120),
+  chequeDate: z.string().min(1, 'A post-dated cheque needs the date written on it'),
+  amountPaise: z.number().int().min(1, 'A cheque must be for a positive amount'),
+  notes: z.string().max(500).optional(),
+});
+
+export const depositPdcSchema = z.object({
+  depositedOn: z.string().optional(),
+});
+
+export const pdcStatusSchema = z.object({
+  status: z.enum(['HELD', 'DEPOSITED', 'CLEARED', 'BOUNCED', 'RETURNED']),
+  reason: z.string().max(300).optional(),
+});
+
+export const adjustInvoiceSchema = z.object({
+  kind: z.enum(['WAIVER', 'WRITE_OFF', 'REBATE']),
+  amountPaise: z.number().int().min(1),
+  reason: z.string().min(1, 'A reason is required — this is money the society is giving up').max(300),
+  adjustedOn: z.string().optional(),
+});
+
+export const requestRefundSchema = z.object({
+  flatId: z.string().regex(objectId, 'Invalid flat id'),
+  amountPaise: z.number().int().min(1),
+  mode: z.enum(['BANK', 'CASH']).optional(),
+  reason: z.string().min(1).max(300),
+});
+
+/**
+ * Budget upsert.
+ *
+ * `accountName` is deliberately NOT accepted: the service reads it off the
+ * ledger. Taking it from the client would let a budget line print a name the
+ * chart of accounts never had.
+ */
+export const upsertBudgetSchema = z.object({
+  fy: z.string().regex(/^\d{4}(-\d{4})?$/, "Financial year must look like '2026' or '2026-2027'").optional(),
+  // An empty array is valid — it clears the budget back to nothing, which is the
+  // only way to undo a budget entered against the wrong year.
+  lines: z.array(z.object({
+    accountCode: z.string().min(1, 'Every budget line needs an account'),
+    budgetedPaise: z.number().int('Budget must be a whole number of paise').min(0, 'A budget cannot be negative'),
+  })).max(500, 'A budget cannot have more than 500 lines'),
+});
+
 export const postJournalSchema = z.object({
   voucherType: z.enum(['JOURNAL', 'OPENING', 'CONTRA']).optional(),
   entryDate: z.string().datetime().optional(),
@@ -97,7 +201,7 @@ export const createChargeHeadSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional(),
   category: chargeCategoryEnum,
-  pricingMode: z.enum(['UNIFORM', 'PER_FLAT_SIZE', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC']),
+  pricingMode: z.enum(['UNIFORM', 'PER_FLAT_SIZE', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC', 'PER_QUANTITY']),
   uniformAmountPaise: z.number().int().min(0).optional(),
   perSizeAmounts: z.array(z.object({
     flatSizeId: z.string().regex(objectId),
@@ -108,15 +212,19 @@ export const createChargeHeadSchema = z.object({
   areaBasis: z.enum(['CARPET', 'BUILTUP']).optional(),
   perUnitRatePaise: z.number().int().min(0).optional(),
   meterType: z.string().optional(),
+  // PER_QUANTITY — the key of Flat.quantities to bill, e.g. 'parkingSlots'.
+  quantityKey: z.string().max(40).regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Use a simple key like parkingSlots').optional(),
   percentOf: z.enum(['MAINTENANCE', 'BASE']).optional(),
   percentValue: z.number().min(0).max(100).optional(),
   applicability: applicabilitySchema.optional(),
   billTo: z.enum(['OWNER', 'OCCUPANT']).optional(),
   incomeAccountCode: z.string().optional(),
-  fundId: z.string().regex(objectId).optional(),
+  // '' / null unlinks the head from its fund (falls back to the category default).
+  fundId: z.union([z.string().regex(objectId), z.literal('')]).nullable().optional(),
   gstApplicable: z.boolean().optional(),
   gstRatePercent: z.number().min(0).max(28).optional(),
   sacCode: z.string().optional(),
+  countsTowardRwaExemption: z.boolean().optional(),
   isRecurring: z.boolean().optional(),
   isActive: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
@@ -131,7 +239,7 @@ const numberingRuleSchema = z.object({
 });
 
 export const updateFinancePolicySchema = z.object({
-  financialYear: z.object({ startMonth: z.number().int().min(1).max(12), startDay: z.number().int().min(1).max(28) }).partial().optional(),
+  financialYear: z.object({ startMonth: z.number().int().min(1).max(12) }).partial().optional(),
   gstin: z.string().max(20).optional(),
   pan: z.string().max(15).optional(),
   numbering: z.object({
@@ -156,7 +264,15 @@ export const updateFinancePolicySchema = z.object({
     capPerInvoicePaise: z.number().int().min(0),
     minChargePaise: z.number().int().min(0),
     chargeHeadCode: z.string(),
-  }).partial().optional(),
+  }).partial()
+    // SLAB with no slabs charges ₹0 interest and says nothing (invoicing.service
+    // `computeInterest`). Reject the combination rather than let late fees quietly
+    // switch themselves off.
+    .refine(lf => !(lf.enabled && lf.mode === 'SLAB' && !lf.slabs?.length), {
+      message: 'Slab interest needs at least one slab, otherwise no interest would be charged at all.',
+      path: ['slabs'],
+    })
+    .optional(),
   reminders: z.object({
     enabled: z.boolean(),
     beforeDueDays: z.array(z.number().int().min(0)),
@@ -168,6 +284,13 @@ export const updateFinancePolicySchema = z.object({
     defaultRatePercent: z.number().min(0).max(28),
     defaultSac: z.string(),
     placeOfSupplyState: z.string(),
+    rwaExemptionPerMemberPaise: z.number().int().min(0),
+    exemptionBasis: z.enum(['FULL_IF_EXCEEDS', 'EXCESS_ONLY']),
+    registrationThresholdPaise: z.number().int().min(0),
+  }).partial().optional(),
+  // null / '' clears the lock and reopens the books.
+  lock: z.object({
+    lockedUpToDate: z.union([z.string(), z.literal('')]).nullable().optional(),
   }).partial().optional(),
   tds: z.object({
     enabled: z.boolean(),
@@ -185,6 +308,18 @@ export const updateFinancePolicySchema = z.object({
   }).partial().optional(),
   settlement: z.object({ mode: z.enum(['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_ROUTE', 'PLATFORM_COLLECT_PAYOUT']) }).partial().optional(),
   advance: z.object({ autoApply: z.boolean() }).partial().optional(),
+  allocation: z.object({
+    interestOrder: z.enum(['PRINCIPAL_FIRST', 'INTEREST_FIRST']),
+  }).partial().optional(),
+  rebate: z.object({
+    enabled: z.boolean(),
+    percent: z.number().min(0).max(100),
+    withinDays: z.number().int().min(0),
+  }).partial().optional(),
+  modules: z.array(z.enum([
+    'EXPENSES', 'FUNDS', 'REFUNDS', 'SHARES', 'ASSETS', 'INVESTMENTS',
+    'BUDGET', 'BANKING', 'PDC', 'NOTICES', 'ACCOUNTING', 'IMPORT',
+  ])).optional(),
 });
 
 export const generateInvoicesSchema = z.object({
@@ -197,7 +332,11 @@ export const generateInvoicesSchema = z.object({
 // ---- Phase 5: settlement ----
 export const updateSettlementSchema = z.object({
   mode: z.enum(['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_ROUTE', 'PLATFORM_COLLECT_PAYOUT']),
-  upiId: z.string().max(80).optional(),
+  // Empty clears the field; anything else must be a real VPA — residents' pay-by-QR
+  // builds a `upi://pay` link from this, and a malformed value yields a dead QR.
+  upiId: z.string().max(80).optional()
+    .refine(v => v === undefined || v === '' || /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/.test(v),
+      { message: 'Enter a valid UPI ID, e.g. society@okhdfcbank' }),
   keyId: z.string().max(80).optional(),
   keySecret: z.string().max(200).optional(),
   webhookSecret: z.string().max(200).optional(),
@@ -241,6 +380,70 @@ export const createExpenseSchema = z.object({
 
 export const payExpenseSchema = z.object({ paymentMode: z.enum(['BANK', 'CASH', 'CHEQUE', 'UPI']).optional() });
 
+// ---- Phase C: fixed assets & depreciation ----
+
+// Only the 15xx cost heads. 1590 (Accumulated Depreciation) is the contra that
+// depreciation credits — an asset's cost must never be booked there.
+const assetAccountCodeEnum = z.enum(['1500', '1510', '1520', '1530', '1540']);
+
+export const createAssetSchema = z.object({
+  name: z.string().min(1, 'Asset name is required').max(150),
+  description: z.string().max(500).optional(),
+  assetAccountCode: assetAccountCodeEnum,
+  purchaseDate: z.string().datetime().optional(),
+  costPaise: z.number().int().min(1, 'Cost is required'),
+  salvageValuePaise: z.number().int().min(0).optional(),
+  method: z.enum(['SLM', 'WDV']),
+  ratePercent: z.number().min(0).max(100),
+  usefulLifeYears: z.number().int().min(0).max(100).optional(),
+  isActive: z.boolean().optional(),
+});
+
+export const updateAssetSchema = createAssetSchema.partial();
+
+export const runDepreciationSchema = z.object({
+  upToDate: z.string().datetime().optional(),
+});
+
+export const disposeAssetSchema = z.object({
+  disposedOn: z.string().optional(),
+  proceedsPaise: z.number().int().min(0).optional(),
+  receivedIn: z.enum(['BANK', 'CASH']).optional(),
+  note: z.string().max(300).optional(),
+});
+
+export const reverseDepreciationSchema = z.object({
+  reason: z.string().max(300).optional(),
+});
+
+// ---- Phase D: fixed deposits & investments ----
+
+export const createInvestmentSchema = z.object({
+  bankName: z.string().min(1, 'Bank name is required').max(150),
+  accountNumberLast4: z.string().regex(/^\d{4}$/, 'Enter the last 4 digits only').optional(),
+  principalPaise: z.number().int().min(1, 'Principal is required'),
+  ratePercent: z.number().min(0).max(100),
+  startDate: z.string().datetime().optional(),
+  maturityDate: z.string().datetime(),
+  interestPayout: z.enum(['CUMULATIVE', 'QUARTERLY', 'ON_MATURITY']).optional(),
+  // '' unlinks the deposit from its fund — its interest then goes to income.
+  linkedFundId: z.union([z.string().regex(objectId), z.literal('')]).nullable().optional(),
+  autoRenew: z.boolean().optional(),
+});
+
+// Principal and accrued interest are consequences of posted vouchers, so they
+// are not editable — omit rather than partial them away.
+export const updateInvestmentSchema = createInvestmentSchema.partial().omit({ principalPaise: true });
+
+export const runInterestAccrualSchema = z.object({
+  upToDate: z.string().datetime().optional(),
+});
+
+export const closeInvestmentSchema = z.object({
+  closedOn: z.string().optional(),
+  proceedsPaise: z.number().int().min(0).optional(),
+});
+
 // ---- Phase 3: collections & receipts ----
 
 const instrumentSchema = z.object({
@@ -271,6 +474,53 @@ export const payOnlineSchema = z.object({
 
 export const bounceReceiptSchema = z.object({
   reason: z.string().max(300).optional(),
+});
+
+// ---- Phase C: bank reconciliation ----
+
+const bankAccountCode = z.string().min(1, 'Select a bank account').max(10).regex(/^[0-9]+$/, 'Account code must be numeric');
+
+export const importBankStatementSchema = z.object({
+  accountCode: bankAccountCode,
+  lines: z.array(z.object({
+    // Not `.datetime()`: a bank CSV carries '01/04/2026', not an ISO timestamp.
+    // The service parses and rejects nonsense, so the message names the row.
+    txnDate: z.string().min(1, 'Every row needs a date'),
+    description: z.string().max(300).optional(),
+    refNo: z.string().max(60).optional(),
+    debitPaise: z.number().int().min(0).optional(),
+    creditPaise: z.number().int().min(0).optional(),
+  })).min(1, 'The statement has no rows to import')
+    // A statement is pasted in one go, so an accidental whole-year paste is the
+    // realistic failure. Bound it here rather than let insertMany discover it.
+    .max(5000, 'Import at most 5,000 rows at a time'),
+});
+
+export const autoMatchBankSchema = z.object({
+  accountCode: bankAccountCode,
+});
+
+export const matchBankLineSchema = z.object({
+  journalEntryId: z.string().regex(objectId, 'Invalid voucher id'),
+});
+
+// ---- Phase C: bulk import (society onboarding) ----
+
+/**
+ * The spreadsheet itself is NOT validated here — zod cannot say whether row 47
+ * names a real flat. It only guards the envelope; the import service checks
+ * every row and reports the verdicts, which is the whole point of the feature.
+ *
+ * `csvText` is optional because the same route also accepts a multipart upload,
+ * where the file arrives on `req.file` and the body is empty.
+ */
+export const bulkImportSchema = z.object({
+  csvText: z.string()
+    // A 200-flat CSV is ~10KB. This bound is a runaway-paste guard, nothing more.
+    .max(2_000_000, 'That paste is too large — upload it as a file instead')
+    .optional(),
+  // Multipart sends fields as text, so 'true' must be accepted alongside true.
+  force: z.union([z.boolean(), z.enum(['true', 'false'])]).optional(),
 });
 
 export const createFundSchema = z.object({

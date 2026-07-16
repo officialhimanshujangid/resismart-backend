@@ -58,6 +58,16 @@ export interface IMaintenanceInvoice extends Document {
   advanceAppliedPaise: number;
   waivedPaise: number;
   outstandingPaise: number;
+  /**
+   * How much of `outstandingPaise` is still-unpaid interest.
+   *
+   * Exists so simple interest can be simple. Interest is charged on the arrears,
+   * and arrears are the sum of open invoices' outstanding — which includes the
+   * interest already charged into them. Without splitting the two, next month's
+   * interest is levied on last month's interest and the books compound no matter
+   * what the policy says.
+   */
+  interestOutstandingPaise: number;
 
   status: InvoiceStatus;
   pdfKey?: string;
@@ -126,6 +136,7 @@ const MaintenanceInvoiceSchema = new Schema<IMaintenanceInvoice>({
   advanceAppliedPaise: { type: Number, default: 0 },
   waivedPaise: { type: Number, default: 0 },
   outstandingPaise: { type: Number, default: 0 },
+  interestOutstandingPaise: { type: Number, default: 0, min: 0 },
 
   status: { type: String, enum: ['DRAFT', 'ISSUED', 'PARTIALLY_PAID', 'PAID', 'OVERDUE', 'WAIVED', 'CANCELLED'], default: 'ISSUED' },
   pdfKey: { type: String },

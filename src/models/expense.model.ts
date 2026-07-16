@@ -8,6 +8,12 @@ export interface IExpenseLine {
   description?: string;
   amountPaise: number;
   fundId?: mongoose.Types.ObjectId;
+  /**
+   * Wing this cost belongs to. Left unset for anything shared — and most costs
+   * genuinely are shared, so this stays optional rather than getting a default.
+   */
+  blockId?: mongoose.Types.ObjectId;
+  blockName?: string;
 }
 
 export interface IExpense extends Document {
@@ -51,6 +57,8 @@ const ExpenseLineSchema = new Schema<IExpenseLine>({
   description: { type: String },
   amountPaise: { type: Number, required: true, min: 0 },
   fundId: { type: Schema.Types.ObjectId, ref: 'FinanceFund' },
+  blockId: { type: Schema.Types.ObjectId, ref: 'Block' },
+  blockName: { type: String, trim: true },
 }, { _id: false });
 
 const ExpenseSchema = new Schema<IExpense>({

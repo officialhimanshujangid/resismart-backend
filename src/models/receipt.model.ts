@@ -9,6 +9,13 @@ export interface IReceiptAllocation {
   invoiceNumber: string;
   billingPeriod: string;
   appliedPaise: number;
+  /**
+   * How much of `appliedPaise` went against interest rather than principal.
+   * Recorded so a bounce can put the invoice back exactly as it was — restoring
+   * only the total would lose the split and quietly change what interest is
+   * charged on next month.
+   */
+  appliedToInterestPaise?: number;
 }
 
 export interface IReceipt extends Document {
@@ -69,6 +76,7 @@ const AllocationSchema = new Schema<IReceiptAllocation>({
   invoiceNumber: { type: String, required: true },
   billingPeriod: { type: String, required: true },
   appliedPaise: { type: Number, required: true, min: 0 },
+  appliedToInterestPaise: { type: Number, default: 0, min: 0 },
 }, { _id: false });
 
 const ReceiptSchema = new Schema<IReceipt>({

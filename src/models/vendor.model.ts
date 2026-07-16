@@ -11,6 +11,15 @@ export interface IVendor extends Document {
   tdsApplicable: boolean;
   tdsSection?: string;
   tdsRatePercent?: number;
+  /**
+   * TDS thresholds. Tax is only deducted once a payment breaches the single-bill
+   * limit OR the vendor's running total for the year breaches the annual one —
+   * deducting from rupee one (as this used to) over-deducts and leaves the
+   * society explaining refunds to its vendors. Defaults follow 194C
+   * (₹30,000 single / ₹1,00,000 aggregate); 0 means "always deduct".
+   */
+  tdsThresholdSinglePaise?: number;
+  tdsThresholdAnnualPaise?: number;
   isActive: boolean;
   createdBy: mongoose.Types.ObjectId;
   createdByName: string;
@@ -29,6 +38,8 @@ const VendorSchema = new Schema<IVendor>({
   tdsApplicable: { type: Boolean, default: false },
   tdsSection: { type: String },
   tdsRatePercent: { type: Number, min: 0 },
+  tdsThresholdSinglePaise: { type: Number, default: 3000000, min: 0 },   // ₹30,000 (194C)
+  tdsThresholdAnnualPaise: { type: Number, default: 10000000, min: 0 },  // ₹1,00,000 (194C)
   isActive: { type: Boolean, default: true },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   createdByName: { type: String, required: true },
