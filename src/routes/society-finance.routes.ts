@@ -9,6 +9,7 @@ import * as financePolicyController from '../controllers/finance-policy.controll
 import * as invoiceController from '../controllers/maintenance-invoice.controller';
 import * as collectionsController from '../controllers/collections.controller';
 import * as expensesController from '../controllers/expenses.controller';
+import * as vendorController from '../controllers/vendor.controller';
 import * as fixedAssetsController from '../controllers/fixed-assets.controller';
 import * as investmentsController from '../controllers/investments.controller';
 import * as settlementController from '../controllers/settlement.controller';
@@ -27,6 +28,8 @@ import {
   generateBillsSchema,
   rejectOfflinePaymentSchema,
   createFundSchema,
+  updateFundSchema,
+  projectChargeHeadSchema,
   postJournalSchema,
   createAccountSchema,
   updateAccountSchema,
@@ -34,6 +37,7 @@ import {
   updateChargeHeadSchema,
   updateFinancePolicySchema,
   generateInvoicesSchema,
+  specialDemandSchema,
   recordPaymentSchema,
   bounceReceiptSchema,
   createVendorSchema,
@@ -94,6 +98,10 @@ router.post('/payments/:paymentId/reject', authorizeRoles(ADMIN_AND_COMMITTEE), 
 // Funds Management
 router.get('/funds', authorizeRoles(ADMIN_AND_COMMITTEE), societyFinanceController.getFunds);
 router.post('/funds', authorizeRoles(ADMIN_ROLES), validate(createFundSchema), societyFinanceController.createFund);
+// A target typed wrongly at creation could never be corrected before this,
+// which made the whole target-vs-raised guard unusable in practice.
+router.patch('/funds/:id', authorizeRoles(ADMIN_ROLES), validate(updateFundSchema), societyFinanceController.updateFundDetails);
+router.post('/funds/projection', authorizeRoles(ADMIN_AND_COMMITTEE), validate(projectChargeHeadSchema), societyFinanceController.projectFundImpact);
 // No /funds/reconcile: fund balances are derived from their ledger accounts on
 // read, so there is nothing left to reconcile.
 
@@ -172,6 +180,7 @@ router.get('/reports/defaulters', authorizeRoles(ADMIN_AND_COMMITTEE), reportsCo
 router.get('/reports/collection-register', authorizeRoles(ADMIN_AND_COMMITTEE), reportsController.collectionRegister);
 router.get('/reports/fund-statement', authorizeRoles(ADMIN_AND_COMMITTEE), reportsController.fundStatement);
 router.get('/reports/gst-register', authorizeRoles(ADMIN_AND_COMMITTEE), reportsController.gstRegister);
+router.get('/reports/vendor-register', authorizeRoles(ADMIN_AND_COMMITTEE), reportsController.vendorRegister);
 router.get('/reports/tds-register', authorizeRoles(ADMIN_AND_COMMITTEE), reportsController.tdsRegister);
 // Must stay above ':key/export' — that route is a catch-all and would capture
 // 'agm-pack' as a report key, then reject it as an unknown report.
@@ -184,9 +193,13 @@ router.get('/settlement', authorizeRoles(ADMIN_ROLES), settlementController.getS
 router.put('/settlement', authorizeRoles(ADMIN_ROLES), validate(updateSettlementSchema), settlementController.updateSettlement);
 
 // Vendors & Expenses (Phase 4)
-router.get('/vendors', authorizeRoles(ADMIN_AND_COMMITTEE), expensesController.listVendors);
-router.post('/vendors', authorizeRoles(ADMIN_ROLES), validate(createVendorSchema), expensesController.createVendor);
-router.put('/vendors/:id', authorizeRoles(ADMIN_ROLES), validate(updateVendorSchema), expensesController.updateVendor);
+// Vendors: the committee can look, only an admin can change. Delete is guarded
+// in the service — a vendor with bills against it is deactivated, never removed.
+router.get('/vendors', authorizeRoles(ADMIN_AND_COMMITTEE), vendorController.list);
+router.get('/vendors/:id', authorizeRoles(ADMIN_AND_COMMITTEE), vendorController.detail);
+router.post('/vendors', authorizeRoles(ADMIN_ROLES), validate(createVendorSchema), vendorController.create);
+router.put('/vendors/:id', authorizeRoles(ADMIN_ROLES), validate(updateVendorSchema), vendorController.update);
+router.delete('/vendors/:id', authorizeRoles(ADMIN_ROLES), vendorController.remove);
 router.get('/expenses', authorizeRoles(ADMIN_AND_COMMITTEE), expensesController.listExpenses);
 router.get('/expenses/summary', authorizeRoles(ADMIN_AND_COMMITTEE), expensesController.getExpenseSummary);
 router.post('/expenses', authorizeRoles(ADMIN_AND_COMMITTEE), validate(createExpenseSchema), expensesController.createExpenseController);
@@ -226,6 +239,7 @@ router.post('/collections/receipts/:id/deposit', authorizeRoles(ADMIN_AND_COMMIT
 router.get('/collections/receipts/:id/pdf', authorizeRoles(ADMIN_AND_COMMITTEE), collectionsController.downloadReceiptPdf);
 
 // Maintenance Invoices (Phase 2 consolidated invoicing)
+router.post('/invoices/special-demand', authorizeRoles(ADMIN_ROLES), validate(specialDemandSchema), invoiceController.raiseSpecialDemand);
 router.post('/invoices/generate', authorizeRoles(ADMIN_ROLES), validate(generateInvoicesSchema), invoiceController.generateInvoices);
 router.get('/invoices', authorizeRoles(ADMIN_AND_COMMITTEE), invoiceController.listInvoices);
 router.get('/invoices/summary', authorizeRoles(ADMIN_AND_COMMITTEE), invoiceController.getInvoiceSummary);

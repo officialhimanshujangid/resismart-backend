@@ -20,9 +20,30 @@ export interface IVendor extends Document {
    */
   tdsThresholdSinglePaise?: number;
   tdsThresholdAnnualPaise?: number;
+
+  /**
+   * Where the society pays this vendor. The account number is encrypted at rest
+   * with the finance key and never returned to a screen — only `last4`, so a
+   * treasurer can confirm they are paying the right account without the number
+   * being readable by anyone who can open the vendor page.
+   */
+  bank?: {
+    accountName?: string;
+    accountNumberEnc?: string;
+    accountNumberIv?: string;
+    accountNumberTag?: string;
+    last4?: string;
+    ifsc?: string;
+    bankName?: string;
+    upiId?: string;
+  };
+
+  notes?: string;
   isActive: boolean;
   createdBy: mongoose.Types.ObjectId;
   createdByName: string;
+  updatedBy?: mongoose.Types.ObjectId;
+  updatedByName?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -40,12 +61,30 @@ const VendorSchema = new Schema<IVendor>({
   tdsRatePercent: { type: Number, min: 0 },
   tdsThresholdSinglePaise: { type: Number, default: 3000000, min: 0 },   // ₹30,000 (194C)
   tdsThresholdAnnualPaise: { type: Number, default: 10000000, min: 0 },  // ₹1,00,000 (194C)
+
+  bank: {
+    accountName: { type: String, trim: true },
+    accountNumberEnc: { type: String },
+    accountNumberIv: { type: String },
+    accountNumberTag: { type: String },
+    last4: { type: String },
+    ifsc: { type: String, trim: true, uppercase: true },
+    bankName: { type: String, trim: true },
+    upiId: { type: String, trim: true },
+  },
+
+  notes: { type: String, trim: true },
   isActive: { type: Boolean, default: true },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   createdByName: { type: String, required: true },
+  updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  updatedByName: { type: String },
 }, { timestamps: true });
 
 VendorSchema.index({ societyId: 1, name: 1 }, { unique: true });
+// Vendor lists filter on active-ness and sort by name; without this every page
+// load scans the society's whole vendor collection.
+VendorSchema.index({ societyId: 1, isActive: 1, name: 1 });
 
 export const Vendor = mongoose.model<IVendor>('Vendor', VendorSchema);
 export default Vendor;

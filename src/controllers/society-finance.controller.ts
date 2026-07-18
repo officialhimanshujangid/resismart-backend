@@ -8,7 +8,9 @@ import { FinanceFund } from '../models/finance-fund.model';
 import mongoose from 'mongoose';
 import FinanceNotificationService from '../services/finance-notification.service';
 import { User } from '../models/user.model';
-import { listFunds, createFund as createFundWithAccount } from '../services/funds.service';
+import { listFunds, createFund as createFundWithAccount, updateFund as updateFundService } from '../services/funds.service';
+import { projectChargeHead } from '../services/fund-projection.service';
+import { auditFinance } from '../utils/finance-audit.util';
 
 export const getSettings = async (req: Request, res: Response): Promise<void> => {
   try {
@@ -345,6 +347,34 @@ export const getFunds = async (req: Request, res: Response): Promise<void> => {
     res.json(await listFunds(societyId, fundActor(req)));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+};
+
+/** PATCH /funds/:id — edit a fund's own details, including its target. */
+export const updateFundDetails = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const societyId = req.user?.activeTenantId;
+    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
+    const fund = await updateFundService(societyId, req.params.id, req.body, fundActor(req));
+    auditFinance(req, 'FINANCE_UPDATE_FUND', 'FinanceFund', req.params.id, { newValues: { name: fund.name, targetAmountPaise: fund.targetAmountPaise } });
+    res.json(fund);
+  } catch (e: any) {
+    if (e.code === 11000) { res.status(409).json({ error: 'A fund with this name already exists' }); return; }
+    res.status(/not found/i.test(e.message) ? 404 : 400).json({ error: e.message });
+  }
+};
+
+/**
+ * POST /funds/projection — what a charge head would raise, and what that does to
+ * the fund behind it. Answered before anything is billed.
+ */
+export const projectFundImpact = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const societyId = req.user?.activeTenantId;
+    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
+    res.json(await projectChargeHead(societyId, req.body, fundActor(req)));
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
   }
 };
 

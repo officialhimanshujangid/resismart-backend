@@ -1,8 +1,11 @@
 import mongoose, { ClientSession } from 'mongoose';
 import { FinanceFund, IFinanceFund, FundCategory } from '../models/finance-fund.model';
 import { LedgerAccount, ILedgerAccount } from '../models/ledger-account.model';
+import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
 import { ACCOUNT_CODES } from './chart-of-accounts.seed';
 import { accountMovements } from './reporting-period.service';
+
+const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
 
 export interface Actor { userId: string; userName: string }
 
@@ -114,6 +117,30 @@ export interface FundView {
   ledgerAccountCode?: string;
   /** Derived from posted journal entries — never a stored copy. */
   currentBalancePaise: number;
+
+  /**
+   * Everything ever credited to this fund — what the society has DEMANDED.
+   *
+   * This, not the balance, is what a target must be judged against. A fund that
+   * raised its full ₹1,50,000 and then paid the painter ₹1,40,000 has a balance
+   * of ₹10,000; comparing that to the target would tell the society to collect
+   * ₹1,40,000 more from members who have already paid in full.
+   */
+  raisedPaise: number;
+  /** Everything ever drawn out — what has been spent from it. */
+  spentPaise: number;
+  /**
+   * How much of what was demanded has actually reached the bank.
+   *
+   * A fund is credited when the invoice is RAISED, not when it is paid, so
+   * `raisedPaise` runs ahead of the cash. Apportioned from each invoice's paid
+   * fraction, because FIFO settles whole invoices and never a single line.
+   */
+  collectedPaise: number;
+  /** Still to be demanded before the target is met. Zero once it is. */
+  remainingToRaisePaise: number;
+  /** Demanded beyond the target. Non-zero means members were over-charged. */
+  overRaisedPaise: number;
 }
 
 /**
@@ -133,24 +160,115 @@ export async function listFunds(societyId: string, actor: Actor): Promise<FundVi
 
   const movements = await accountMovements(societyId, {}, ['FUND']);
   const byAccountId = new Map(movements.map((m) => [m.accountId, m]));
+  const collected = await collectedByFund(societyId);
 
   return funds
     .map((f) => {
       const m = f.ledgerAccountId ? byAccountId.get(String(f.ledgerAccountId)) : undefined;
+      const targetAmountPaise = f.targetAmountPaise || 0;
+      // Gross in and gross out, not the net. See `raisedPaise` on FundView for
+      // why the net would make the system demand money it already has.
+      const raisedPaise = m?.creditPaise ?? 0;
+      const spentPaise = m?.debitPaise ?? 0;
       return {
         _id: String(f._id),
         name: f.name,
         category: f.category,
         description: f.description,
-        targetAmountPaise: f.targetAmountPaise || 0,
+        targetAmountPaise,
         isInvested: f.isInvested,
         isActive: f.isActive,
         ledgerAccountId: f.ledgerAccountId ? String(f.ledgerAccountId) : undefined,
         ledgerAccountCode: m?.code,
         currentBalancePaise: m?.balancePaise ?? 0,
+        raisedPaise,
+        spentPaise,
+        collectedPaise: collected.get(String(f._id)) || 0,
+        remainingToRaisePaise: targetAmountPaise > 0 ? Math.max(0, targetAmountPaise - raisedPaise) : 0,
+        overRaisedPaise: targetAmountPaise > 0 ? Math.max(0, raisedPaise - targetAmountPaise) : 0,
       };
     })
     .sort((a, b) => b.currentBalancePaise - a.currentBalancePaise);
+}
+
+/**
+ * How much cash has actually arrived against each fund.
+ *
+ * A fund is credited when the bill is raised, so its ledger balance is what was
+ * demanded, not what came in. Receipts settle whole invoices — FIFO never
+ * allocates to a single line — so the honest figure is each fund line scaled by
+ * how much of its invoice has been paid. Approximate by nature, and labelled as
+ * such on screen; the guard that actually protects members is raised-vs-target.
+ */
+async function collectedByFund(societyId: string): Promise<Map<string, number>> {
+  const rows = await MaintenanceInvoice.aggregate([
+    { $match: { societyId: oid(societyId), 'lineItems.fundId': { $exists: true, $ne: null } } },
+    {
+      $project: {
+        totalPaise: 1,
+        outstandingPaise: 1,
+        lineItems: {
+          $filter: { input: '$lineItems', as: 'li', cond: { $ne: ['$$li.fundId', null] } },
+        },
+      },
+    },
+    { $unwind: '$lineItems' },
+    {
+      $group: {
+        _id: '$lineItems.fundId',
+        collectedPaise: {
+          $sum: {
+            $cond: [
+              { $gt: ['$totalPaise', 0] },
+              {
+                $round: [{
+                  $multiply: [
+                    '$lineItems.lineTotalPaise',
+                    { $divide: [{ $subtract: ['$totalPaise', '$outstandingPaise'] }, '$totalPaise'] },
+                  ],
+                }, 0],
+              },
+              0,
+            ],
+          },
+        },
+      },
+    },
+  ]);
+  return new Map(rows.map((r: any) => [String(r._id), Math.max(0, r.collectedPaise || 0)]));
+}
+
+/**
+ * Edit a fund's own details.
+ *
+ * There was no update route at all: a target typed wrongly at creation could
+ * never be corrected, which made the whole target-vs-raised guard unusable in
+ * practice. Category is deliberately not editable — it decides which seeded
+ * ledger account the fund adopted, and changing it after money has moved would
+ * strand the balance in the old account.
+ */
+export async function updateFund(
+  societyId: string,
+  fundId: string,
+  body: { name?: string; description?: string; targetAmountPaise?: number; isInvested?: boolean; isActive?: boolean },
+  actor: Actor,
+): Promise<IFinanceFund> {
+  const fund = await FinanceFund.findOne({ _id: fundId, societyId });
+  if (!fund) throw new Error('Fund not found');
+
+  if (body.name !== undefined) {
+    if (!body.name.trim()) throw new Error('A fund needs a name');
+    fund.name = body.name.trim();
+  }
+  if (body.description !== undefined) fund.description = body.description;
+  if (body.targetAmountPaise !== undefined) fund.targetAmountPaise = Math.max(0, Math.round(body.targetAmountPaise));
+  if (body.isInvested !== undefined) fund.isInvested = body.isInvested;
+  if (body.isActive !== undefined) fund.isActive = body.isActive;
+
+  fund.updatedBy = new mongoose.Types.ObjectId(actor.userId);
+  fund.updatedByName = actor.userName;
+  await fund.save();
+  return fund;
 }
 
 /** Create a fund together with its backing FUND ledger account. */

@@ -64,6 +64,9 @@ import {
   downloadTenancyDocument,
 } from '../controllers/household.controller';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
+import { validate } from '../middlewares/validate.middleware';
+import * as flatDocumentController from '../controllers/flat-document.controller';
+import { addFlatDocumentSchema } from '../validators/flat-document.validator';
 import { enforceLimit } from '../middlewares/subscription.guard';
 import { uploadExcel } from '../middlewares/upload.middleware';
 import { Flat } from '../models/flat.model';
@@ -138,6 +141,19 @@ router.post('/household/:residentId/set-head', authenticateJWT, enforceTenantAcc
 router.post('/household/:residentId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), addHouseholdDocument);
 router.get('/household/:residentId/documents/:docId/download', authenticateJWT, enforceTenantAccess, downloadHouseholdDocument);
 router.delete('/household/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), removeHouseholdMember);
+
+// --- Flat documents (title papers that outlive whoever lives there) ---
+//
+// The precise rule lives in `flatDocumentAccess`, because it turns on which
+// household a resident belongs to rather than on their role alone: a tenant —
+// and a tenant's family — must not see a sale deed, which carries the owner's
+// purchase price. These role lists are only the outer gate; owners are let
+// through here and then checked properly in the service.
+const FLAT_DOC_ROLES = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER, UserRole.FAMILY_MEMBER];
+router.get('/flats/:flatId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_DOC_ROLES), flatDocumentController.list);
+router.get('/flats/:flatId/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_DOC_ROLES), flatDocumentController.download);
+router.post('/flats/:flatId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), validate(addFlatDocumentSchema), flatDocumentController.add);
+router.delete('/flats/:flatId/documents/:docId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.RESIDENT_OWNER]), flatDocumentController.remove);
 
 // --- Tenancy (current tenant household + tenancy documents) ---
 router.get('/flats/:flatId/tenancy', authenticateJWT, enforceTenantAccess, getTenancy);

@@ -20,6 +20,7 @@ import { SequenceCounter } from '../models/sequence-counter.model';
 import { ShareCertificate } from '../models/share-certificate.model';
 import { Flat } from '../models/flat.model';
 import { Block } from '../models/block.model';
+import { FlatSize } from '../models/flat-size.model';
 import { seedChartOfAccounts } from '../services/chart-of-accounts.seed';
 import { getOrCreatePolicy } from '../services/finance-policy.service';
 import { trialBalance } from '../services/reports.service';
@@ -47,17 +48,17 @@ async function cleanup() {
     LedgerAccount.deleteMany({ societyId }), JournalEntry.deleteMany({ societyId }),
     FinanceFund.deleteMany({ societyId }), FinancePolicy.deleteMany({ societyId }),
     SequenceCounter.deleteMany({ societyId }), ShareCertificate.deleteMany({ societyId }),
-    Flat.deleteMany({ societyId }), Block.deleteMany({ societyId }),
+    Flat.deleteMany({ societyId }), Block.deleteMany({ societyId }), FlatSize.deleteMany({ societyId }),
   ]);
 }
 
 const csv = (lines: string[]) => lines.join('\n');
 
 const FLATS_CSV = csv([
-  'Block,Flat Number,Status,Carpet Area Sqft,Built-up Area Sqft',
-  'A Wing,101,OWNER_OCCUPIED,620,750',
-  'A Wing,102,RENTED,620,750',
-  'B Wing,201,VACANT,,',
+  'Block,Flat Number,Status,Size',
+  'A Wing,101,OWNER_OCCUPIED,2BHK 1600',
+  'A Wing,102,RENTED,2BHK 1600',
+  'B Wing,201,VACANT,',
 ]);
 
 const MEMBERS_CSV = csv([
@@ -83,6 +84,19 @@ async function main() {
 
     // ---------------------------------------------------- I1 flats
     console.log('I1 — flats import');
+    // The import names a size; the area itself lives on that size.
+    const [sizeDoc] = await FlatSize.create([{
+      name: '2BHK 1600', carpetAreaSqft: 1600, builtUpAreaSqft: 1850, societyId,
+      createdBy: userId, updatedBy: userId,
+    }]);
+    const sizeId = sizeDoc._id;
+
+    const badSize = await preview(SID, 'FLATS', {
+      csvText: ['Block,Flat Number,Status,Size', 'A Wing,999,VACANT,No Such Size'].join('\n'),
+    });
+    eq('a size that does not exist is an ERROR, not a silent skip', badSize.totals.error, 1);
+    ok('…naming what to fix', /No flat size named/.test(badSize.rows[0].message || ''), badSize.rows[0].message);
+
     const p1 = await preview(SID, 'FLATS', { csvText: FLATS_CSV });
     eq('a clean file previews every row as CREATE', p1.totals.create, 3);
     eq('…with nothing to skip', p1.totals.skip, 0);
@@ -97,10 +111,12 @@ async function main() {
     const f101 = await Flat.findOne({ societyId, number: '101' }).lean();
     eq('…and the flat is wired to its block', String(f101?.blockId), String((await Block.findOne({ societyId, name: 'A Wing' }).lean())?._id));
     eq('status comes across', f101?.status, 'OWNER_OCCUPIED');
-    eq('optional areas come across', f101?.carpetAreaSqft, 620);
+    // The size is named in the file and resolved to its id — the area itself
+    // lives on that size, so it is never typed per flat.
+    eq('the named size is wired up', String(f101?.size), String(sizeId));
     const vacant = await Flat.findOne({ societyId, number: '201' }).lean();
-    eq('a VACANT flat with blank areas is fine', vacant?.status, 'VACANT');
-    ok('…and carries no area', vacant?.carpetAreaSqft === undefined, String(vacant?.carpetAreaSqft));
+    eq('a VACANT flat with no size named is fine', vacant?.status, 'VACANT');
+    ok('…and simply has no size', vacant?.size === undefined, String(vacant?.size));
 
     // Idempotency: the same file again must add nothing.
     const p1again = await preview(SID, 'FLATS', { csvText: FLATS_CSV });

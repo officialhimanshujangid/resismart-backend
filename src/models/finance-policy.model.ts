@@ -1,6 +1,16 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
-export type SettlementMode = 'OFFLINE_ONLY' | 'OWN_KEYS' | 'PLATFORM_ROUTE' | 'PLATFORM_COLLECT_PAYOUT';
+/**
+ * How online money reaches the society.
+ *
+ * `PLATFORM_ROUTE` was removed: `routeAccountId` was stored and validated but
+ * never read at payment time — `createPaymentLink` sent no `transfers` array, so
+ * no split settlement ever actually happened and it behaved identically to
+ * PLATFORM_COLLECT_PAYOUT. A mode that cannot be explained to the society buying
+ * it, and does not do what its name says, is worse than no mode at all.
+ * Legacy values are migrated in `getOrCreatePolicy`.
+ */
+export type SettlementMode = 'OFFLINE_ONLY' | 'OWN_KEYS' | 'PLATFORM_COLLECT_PAYOUT';
 export type LateFeeMode = 'FLAT' | 'PERCENT_PER_MONTH' | 'PERCENT_PER_ANNUM' | 'SLAB';
 export type RoundingMode = 'NONE' | 'NEAREST_RUPEE' | 'CEIL_RUPEE';
 
@@ -100,7 +110,6 @@ export interface IFinancePolicy extends Document {
       keySecretEnc?: string; keySecretIv?: string; keySecretTag?: string;
       webhookSecretEnc?: string; webhookSecretIv?: string; webhookSecretTag?: string;
     };
-    routeAccountId?: string;
     payoutBank?: {
       accountName?: string;
       accountNumberEnc?: string; accountNumberIv?: string; accountNumberTag?: string;
@@ -239,14 +248,13 @@ const FinancePolicySchema = new Schema<IFinancePolicy>({
   },
 
   settlement: {
-    mode: { type: String, enum: ['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_ROUTE', 'PLATFORM_COLLECT_PAYOUT'], default: 'OFFLINE_ONLY' },
+    mode: { type: String, enum: ['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_COLLECT_PAYOUT'], default: 'OFFLINE_ONLY' },
     upiId: { type: String, trim: true },
     ownKeys: {
       keyId: { type: String },
       keySecretEnc: { type: String }, keySecretIv: { type: String }, keySecretTag: { type: String },
       webhookSecretEnc: { type: String }, webhookSecretIv: { type: String }, webhookSecretTag: { type: String },
     },
-    routeAccountId: { type: String },
     payoutBank: {
       accountName: { type: String, trim: true },
       accountNumberEnc: { type: String }, accountNumberIv: { type: String }, accountNumberTag: { type: String },

@@ -22,11 +22,16 @@ export const createFlatSchema = z.object({
   number: z.string().min(1, 'Flat number is required'),
   fullAddress: z.string().optional(),
   registrationNumber: z.string().optional(),
-  sizeId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid Size ID').optional(),
+  // Required: the size carries the carpet/built-up area that PER_SQFT billing
+  // multiplies, so a flat created without one can never be billed per sqft.
+  // Deliberately NOT enforced on the model — existing flats predate this and
+  // must keep saving — nor on bulk import, which the preview flags instead.
+  sizeId: z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid Size ID"),
   headOfFamily: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID').optional(),
   familyMembers: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid User ID')).optional(),
   latitude: z.coerce.number().min(-90).max(90).optional(),
   longitude: z.coerce.number().min(-180).max(180).optional(),
+
 
   // Optional owner info — a flat may be created vacant. If present, it must be complete,
   // with BOTH the owner email and phone OTP-verified.

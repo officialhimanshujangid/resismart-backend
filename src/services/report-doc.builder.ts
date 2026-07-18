@@ -38,6 +38,7 @@ export const REPORT_TITLES: Record<string, string> = {
   'collection-register': 'Collection Register',
   'fund-statement': 'Fund Statement',
   'gst-register': 'GST Output Register',
+  'vendor-register': 'Vendor Register',
   'tds-register': 'TDS Register',
   'budget-vs-actual': 'Budget vs Actual',
 };
@@ -138,6 +139,39 @@ export function buildExportDoc(key: string, data: any, societyName: string): Exp
             }];
           }),
         ],
+      };
+    }
+
+    case 'vendor-register': {
+      return {
+        ...base,
+        meta: [
+          data.missingPanCount
+            ? `${data.missingPanCount} TDS vendor(s) have no PAN — Form 26Q cannot be filed for them`
+            : 'Every TDS vendor has a PAN on record',
+          'Outstanding is the balance owed today, not a figure for the period.',
+        ],
+        sections: [{
+          columns: ['Vendor', 'PAN', 'TDS', 'Bills', 'Billed', 'TDS withheld', 'Paid', 'Outstanding'],
+          moneyColumns: [4, 5, 6, 7],
+          rows: data.rows.map((r: any) => [
+            `${r.name}${r.isActive ? '' : ' (inactive)'}`,
+            r.pan || (r.missingPan ? 'MISSING' : '—'),
+            r.tds || '—',
+            String(r.bills),
+            money(r.billedPaise),
+            money(r.tdsPaise),
+            money(r.paidPaise),
+            money(r.outstandingPaise),
+          ] as Cell[]),
+          footer: [
+            'Total', '', '', '',
+            money(data.totals.billedPaise),
+            money(data.totals.tdsPaise),
+            money(data.totals.paidPaise),
+            money(data.totals.outstandingPaise),
+          ],
+        }],
       };
     }
 

@@ -5,6 +5,7 @@ import * as accounts from '../services/chart-of-accounts.service';
 import { AccountError } from '../services/chart-of-accounts.service';
 import { JournalEntry } from '../models/journal-entry.model';
 import { postJournal } from '../services/ledger.service';
+import { getFyStartMonth } from '../services/finance-policy.service';
 import { trialBalance } from '../services/reports.service';
 import { seedChartOfAccounts } from '../services/chart-of-accounts.seed';
 
@@ -125,6 +126,11 @@ export const postManualJournal = async (req: Request, res: Response): Promise<vo
       narration,
       lines,
       sourceType: 'ADJUSTMENT',
+      // Without this, postJournal falls back to April and a society on a
+      // non-April financial year gets every hand-posted voucher stamped with
+      // the wrong FY — and numbered from that wrong year's sequence.
+      // reverseJournal already guards this; the manual path was missed.
+      fyStartMonth: await getFyStartMonth(societyId),
       postedBy: req.user!.userId,
       postedByName: req.user!.userName || 'Admin',
     });

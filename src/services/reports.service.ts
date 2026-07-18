@@ -646,6 +646,99 @@ const tdsQuarter = (d: Date): string => {
  * 16A from. Only APPROVED/PAID expenses appear: TDS is deducted when the expense
  * is accrued or paid, so a draft has deducted nothing.
  */
+/**
+ * Every vendor: what was billed in the period, what was withheld, what was paid,
+ * and what the society still owes.
+ *
+ * Outstanding is taken from the LEDGER — the `2200 Sundry Creditors` lines
+ * tagged with each vendor — not from the expense documents, because the ledger
+ * is what the Balance Sheet reports. The total therefore reconciles to the
+ * Creditors control account, and the suite asserts exactly that. Only the
+ * Creditors leg is counted: an expense also debits 5xxx with the same vendor
+ * tag, and counting both would double every bill.
+ */
+export async function vendorRegister(societyId: string, from?: string, to?: string) {
+  const sid = oid(societyId);
+  const period = dayWindow(from, to);
+
+  const expenseMatch: any = { societyId: sid, status: { $nin: ['REJECTED', 'CANCELLED'] }, vendorId: { $ne: null } };
+  if (period) expenseMatch.expenseDate = period;
+
+  const [vendors, billed, ledger] = await Promise.all([
+    Vendor.find({ societyId: sid }).select('name pan gstin tdsApplicable tdsSection tdsRatePercent isActive').sort({ name: 1 }).lean(),
+    Expense.aggregate([
+      { $match: expenseMatch },
+      {
+        $group: {
+          _id: '$vendorId',
+          billedPaise: { $sum: '$grossPaise' },
+          tdsPaise: { $sum: '$tdsPaise' },
+          bills: { $sum: 1 },
+        },
+      },
+    ]),
+    // Outstanding is a position, not a period figure, so it is never date-filtered:
+    // a bill raised last year and still unpaid is money owed today.
+    JournalEntry.aggregate([
+      // $elemMatch, NOT `'lines.vendorId': { $ne: null }`.
+      //
+      // On an array, `$ne: null` means "NO element is null" — so a voucher was
+      // excluded outright the moment any one of its lines lacked a vendor, which
+      // is every payment (the bank leg) and every accrual carrying TDS. The
+      // vendor's payments vanished while its accruals stayed, and the totals
+      // still tied because the two excluded halves netted to zero.
+      { $match: { societyId: sid, lines: { $elemMatch: { vendorId: { $exists: true, $ne: null } } } } },
+      { $unwind: '$lines' },
+      { $match: { 'lines.accountCode': ACCOUNT_CODES.CREDITORS, 'lines.vendorId': { $ne: null } } },
+      {
+        $group: {
+          _id: '$lines.vendorId',
+          creditPaise: { $sum: '$lines.creditPaise' },
+          debitPaise: { $sum: '$lines.debitPaise' },
+        },
+      },
+    ]),
+  ]);
+
+  const billedBy = new Map(billed.map((b: any) => [String(b._id), b]));
+  const ledgerBy = new Map(ledger.map((l: any) => [String(l._id), l]));
+
+  const rows = vendors.map(v => {
+    const b: any = billedBy.get(String(v._id)) || {};
+    const l: any = ledgerBy.get(String(v._id)) || {};
+    const paidPaise = l.debitPaise || 0;
+    return {
+      vendorId: String(v._id),
+      name: v.name,
+      pan: v.pan,
+      gstin: v.gstin,
+      tds: v.tdsApplicable ? `${v.tdsSection || '—'} @ ${v.tdsRatePercent ?? 0}%` : null,
+      /** Blocks Form 26Q — the same flag the TDS register raises. */
+      missingPan: !!v.tdsApplicable && !v.pan,
+      isActive: v.isActive !== false,
+      bills: b.bills || 0,
+      billedPaise: b.billedPaise || 0,
+      tdsPaise: b.tdsPaise || 0,
+      paidPaise,
+      outstandingPaise: (l.creditPaise || 0) - paidPaise,
+    };
+  })
+    // A vendor with no activity in the window and nothing owed is just noise.
+    .filter(r => r.bills > 0 || r.outstandingPaise !== 0)
+    .sort((a, b) => b.outstandingPaise - a.outstandingPaise || b.billedPaise - a.billedPaise);
+
+  return {
+    rows,
+    totals: {
+      billedPaise: rows.reduce((s, r) => s + r.billedPaise, 0),
+      tdsPaise: rows.reduce((s, r) => s + r.tdsPaise, 0),
+      paidPaise: rows.reduce((s, r) => s + r.paidPaise, 0),
+      outstandingPaise: rows.reduce((s, r) => s + r.outstandingPaise, 0),
+    },
+    missingPanCount: rows.filter(r => r.missingPan).length,
+  };
+}
+
 export async function tdsRegister(societyId: string, from?: string, to?: string) {
   const q: any = { societyId: oid(societyId), tdsPaise: { $gt: 0 }, status: { $in: ['APPROVED', 'PAID'] } };
   const period = dayWindow(from, to);

@@ -196,15 +196,20 @@ const applicabilitySchema = z.object({
   exemptFlatIds: z.array(z.string().regex(objectId)).optional(),
 });
 
-export const createChargeHeadSchema = z.object({
+const chargeHeadFields = z.object({
   code: z.string().min(1).max(30),
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional(),
   category: chargeCategoryEnum,
-  pricingMode: z.enum(['UNIFORM', 'PER_FLAT_SIZE', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC', 'PER_QUANTITY']),
+  pricingMode: z.enum(['UNIFORM', 'PER_FLAT_SIZE', 'PER_BLOCK', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC', 'PER_QUANTITY']),
   uniformAmountPaise: z.number().int().min(0).optional(),
   perSizeAmounts: z.array(z.object({
     flatSizeId: z.string().regex(objectId),
+    label: z.string(),
+    amountPaise: z.number().int().min(0),
+  })).optional(),
+  perBlockAmounts: z.array(z.object({
+    blockId: z.string().regex(objectId),
     label: z.string(),
     amountPaise: z.number().int().min(0),
   })).optional(),
@@ -230,7 +235,53 @@ export const createChargeHeadSchema = z.object({
   sortOrder: z.number().int().optional(),
 });
 
-export const updateChargeHeadSchema = createChargeHeadSchema.partial().omit({ code: true });
+/**
+ * The chosen pricing mode must actually be able to price something.
+ *
+ * Every config field is independently optional, so a PER_SQFT head with no rate,
+ * or a PER_FLAT_SIZE head with no amounts, used to save happily and then bill ₹0
+ * for ever — the engine drops a zero line, so nobody found out until a member
+ * asked why their bill was short. Checked on edit as well as create: switching
+ * an existing head to a new mode has to satisfy the new mode.
+ */
+const pricingCoherence = (v: any, ctx: z.RefinementCtx) => {
+  const need = (cond: boolean, path: string, message: string) => {
+    if (!cond) ctx.addIssue({ code: 'custom', path: [path], message });
+  };
+  switch (v.pricingMode) {
+    case 'UNIFORM':
+    case 'FLAT_ADHOC':
+      need(!!v.uniformAmountPaise, 'uniformAmountPaise', 'Set the amount to charge');
+      break;
+    case 'PER_FLAT_SIZE':
+      need(!!v.perSizeAmounts?.length, 'perSizeAmounts', 'Add an amount for at least one flat size');
+      break;
+    case 'PER_BLOCK':
+      need(!!v.perBlockAmounts?.length, 'perBlockAmounts', 'Add an amount for at least one wing');
+      break;
+    case 'PER_SQFT':
+      need(!!v.ratePerSqftPaise, 'ratePerSqftPaise', 'Set the rate per square foot');
+      break;
+    case 'METERED':
+      need(!!v.perUnitRatePaise, 'perUnitRatePaise', 'Set the rate per unit');
+      break;
+    case 'PER_QUANTITY':
+      need(!!v.perUnitRatePaise, 'perUnitRatePaise', 'Set the rate for one unit');
+      need(!!v.quantityKey, 'quantityKey', 'Name the per-flat count to bill, e.g. parkingSlots');
+      break;
+    case 'PERCENTAGE':
+      need(!!v.percentValue, 'percentValue', 'Set the percentage to charge');
+      need(!!v.percentOf, 'percentOf', 'Choose what the percentage is taken of');
+      break;
+  }
+};
+
+export const createChargeHeadSchema = chargeHeadFields.superRefine(pricingCoherence);
+export const updateChargeHeadSchema = chargeHeadFields.partial().omit({ code: true }).superRefine((v, ctx) => {
+  // A partial edit that doesn't touch the mode has nothing to check here; the
+  // service re-validates against the stored mode when it merges.
+  if (v.pricingMode) pricingCoherence(v, ctx);
+});
 
 const numberingRuleSchema = z.object({
   prefix: z.string().min(1).max(10),
@@ -306,7 +357,7 @@ export const updateFinancePolicySchema = z.object({
     requireDualControlForReceipts: z.boolean(),
     refundRequiresApproval: z.boolean(),
   }).partial().optional(),
-  settlement: z.object({ mode: z.enum(['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_ROUTE', 'PLATFORM_COLLECT_PAYOUT']) }).partial().optional(),
+  settlement: z.object({ mode: z.enum(['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_COLLECT_PAYOUT']) }).partial().optional(),
   advance: z.object({ autoApply: z.boolean() }).partial().optional(),
   allocation: z.object({
     interestOrder: z.enum(['PRINCIPAL_FIRST', 'INTEREST_FIRST']),
@@ -327,11 +378,28 @@ export const generateInvoicesSchema = z.object({
   chargeHeadIds: z.array(z.string().regex(objectId)).optional(),
   flatIds: z.array(z.string().regex(objectId)).optional(),
   dryRun: z.boolean().optional(),
+  /** Acknowledges that this run pushes a fund past its target. */
+  confirmOverTarget: z.boolean().optional(),
+});
+
+/**
+ * A special demand always names at least one charge head and says why. The
+ * period is NOT accepted: it is minted server-side as YYYY-MM-Sn so two
+ * demands in one month cannot collide.
+ */
+export const specialDemandSchema = z.object({
+  chargeHeadIds: z.array(z.string().regex(objectId)).min(1, "Choose what you are billing for"),
+  flatIds: z.array(z.string().regex(objectId)).optional(),
+  blockIds: z.array(z.string().regex(objectId)).optional(),
+  title: z.string().min(1, "Say what this demand is for — members will see it").max(150),
+  dueDate: z.string().optional(),
+  dryRun: z.boolean().optional(),
+  confirmOverTarget: z.boolean().optional(),
 });
 
 // ---- Phase 5: settlement ----
 export const updateSettlementSchema = z.object({
-  mode: z.enum(['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_ROUTE', 'PLATFORM_COLLECT_PAYOUT']),
+  mode: z.enum(['OFFLINE_ONLY', 'OWN_KEYS', 'PLATFORM_COLLECT_PAYOUT']),
   // Empty clears the field; anything else must be a real VPA — residents' pay-by-QR
   // builds a `upi://pay` link from this, and a malformed value yields a dead QR.
   upiId: z.string().max(80).optional()
@@ -340,7 +408,6 @@ export const updateSettlementSchema = z.object({
   keyId: z.string().max(80).optional(),
   keySecret: z.string().max(200).optional(),
   webhookSecret: z.string().max(200).optional(),
-  routeAccountId: z.string().max(80).optional(),
   payoutAccountName: z.string().max(120).optional(),
   payoutAccountNumber: z.string().max(30).optional(),
   payoutIfsc: z.string().max(15).optional(),
@@ -349,19 +416,66 @@ export const updateSettlementSchema = z.object({
 
 // ---- Phase 4: expenses & vendors ----
 
-export const createVendorSchema = z.object({
+/** Blank clears the field; anything else must be a well-formed PAN/GSTIN — a
+ *  malformed PAN is worse than a missing one, because Form 26Q silently fails
+ *  validation at the TRACES end rather than here. */
+const panField = z.string().max(15).optional()
+  .refine(v => !v || /^[A-Z]{5}[0-9]{4}[A-Z]$/.test(v.toUpperCase()),
+    { message: 'PAN should look like AABCL1234M' });
+const gstinField = z.string().max(20).optional()
+  .refine(v => !v || /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]{3}$/.test(v.toUpperCase()),
+    { message: 'GSTIN should be 15 characters, e.g. 27AABCL1234M1Z5' });
+
+const vendorBankSchema = z.object({
+  accountName: z.string().max(120).optional(),
+  /** Sent only when changing it; blank keeps whatever is stored. */
+  accountNumber: z.string().max(30).optional()
+    .refine(v => !v || /^[0-9]{6,20}$/.test(v), { message: 'Account number should be 6–20 digits' }),
+  ifsc: z.string().max(15).optional()
+    .refine(v => !v || /^[A-Z]{4}0[A-Z0-9]{6}$/.test(v.toUpperCase()), { message: 'IFSC should look like HDFC0001234' }),
+  bankName: z.string().max(120).optional(),
+  upiId: z.string().max(80).optional()
+    .refine(v => !v || /^[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}$/.test(v), { message: 'Enter a valid UPI ID, e.g. vendor@okicici' }),
+}).optional();
+
+const vendorFields = z.object({
   name: z.string().min(1).max(150),
   contactPerson: z.string().max(120).optional(),
   phone: z.string().max(20).optional(),
-  email: z.string().max(150).optional(),
-  gstin: z.string().max(20).optional(),
-  pan: z.string().max(15).optional(),
+  email: z.string().max(150).optional()
+    .refine(v => !v || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v), { message: 'Enter a valid email address' }),
+  gstin: gstinField,
+  pan: panField,
   tdsApplicable: z.boolean().optional(),
   tdsSection: z.string().max(20).optional(),
   tdsRatePercent: z.number().min(0).max(30).optional(),
+  // These drive whether tax is withheld at all. They were absent here, so the
+  // schema defaults could never be changed — not from the UI, not from the API.
+  tdsThresholdSinglePaise: z.number().int().min(0).optional(),
+  tdsThresholdAnnualPaise: z.number().int().min(0).optional(),
+  bank: vendorBankSchema,
+  notes: z.string().max(1000).optional(),
   isActive: z.boolean().optional(),
 });
-export const updateVendorSchema = createVendorSchema.partial();
+
+/**
+ * A vendor set up for TDS but missing its rate or PAN is worse than one with TDS
+ * off: the flag reads as "handled" while the society under-deducts all year, and
+ * Form 26Q cannot be filed for a deductee with no PAN. Applied to create and
+ * update alike — a partial edit that switches TDS on must satisfy it too.
+ */
+const tdsCoherence = (v: any, ctx: z.RefinementCtx) => {
+  if (!v.tdsApplicable) return;
+  if (!v.tdsRatePercent) {
+    ctx.addIssue({ code: 'custom', path: ['tdsRatePercent'], message: 'Set the TDS rate, or turn TDS off for this vendor' });
+  }
+  if (!v.pan) {
+    ctx.addIssue({ code: 'custom', path: ['pan'], message: 'PAN is required for a TDS vendor — Form 26Q cannot be filed without it' });
+  }
+};
+
+export const createVendorSchema = vendorFields.superRefine(tdsCoherence);
+export const updateVendorSchema = vendorFields.partial().superRefine(tdsCoherence);
 
 export const createExpenseSchema = z.object({
   vendorId: z.string().regex(objectId).optional(),
@@ -466,6 +580,13 @@ export const reportOfflineReceiptSchema = z.object({
   amountPaise: z.number().int().min(1),
   instrument: instrumentSchema,
   referenceNote: z.string().max(300).optional(),
+  /**
+   * The member knowingly paid more than they owe, and wants the surplus held as
+   * advance credit. Opt-in on purpose: without it, an amount above the dues is
+   * far more likely to be a typo than a deliberate prepayment, and the server
+   * refuses rather than quietly parking someone's money.
+   */
+  payAdvance: z.boolean().optional(),
 });
 
 export const payOnlineSchema = z.object({
@@ -530,3 +651,22 @@ export const createFundSchema = z.object({
   targetAmountPaise: z.number().int().min(0).optional(),
   isInvested: z.boolean().optional(),
 });
+
+/**
+ * Category is deliberately absent: it decides which seeded ledger account the
+ * fund adopted, and changing it once money has moved would strand the balance in
+ * the old account.
+ */
+export const updateFundSchema = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(500).optional(),
+  targetAmountPaise: z.number().int().min(0).optional(),
+  isInvested: z.boolean().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export const projectChargeHeadSchema = z.object({
+  chargeHeadId: z.string().regex(objectId).optional(),
+  /** An unsaved form, so the projection can update as the treasurer types. */
+  draft: z.any().optional(),
+}).refine(v => v.chargeHeadId || v.draft, { message: 'Pass a charge head id or a draft' });

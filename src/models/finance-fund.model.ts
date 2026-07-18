@@ -29,6 +29,8 @@ export interface IFinanceFund extends Document {
   ledgerAccountId?: mongoose.Types.ObjectId;
   createdBy: mongoose.Types.ObjectId;
   createdByName: string;
+  updatedBy?: mongoose.Types.ObjectId;
+  updatedByName?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -49,6 +51,8 @@ const FinanceFundSchema = new Schema<IFinanceFund>({
   ledgerAccountId: { type: Schema.Types.ObjectId, ref: 'LedgerAccount' },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   createdByName: { type: String, required: true },
+  updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  updatedByName: { type: String },
 }, { timestamps: true });
 
 FinanceFundSchema.index({ societyId: 1, name: 1 }, { unique: true });

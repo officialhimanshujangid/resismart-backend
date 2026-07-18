@@ -5,20 +5,89 @@ import { generateInvoicesForSociety } from '../services/invoicing.service';
 import { generateAndStoreInvoicePdf } from '../services/society-invoice.service';
 import { Society } from '../models/society.model';
 import { auditFinance } from '../utils/finance-audit.util';
+import { projectRunFundImpact } from '../services/fund-projection.service';
 
 export const generateInvoices = async (req: Request, res: Response): Promise<void> => {
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
 
-    const { period, chargeHeadIds, flatIds, dryRun } = req.body;
+    const { period, chargeHeadIds, flatIds, dryRun, confirmOverTarget } = req.body;
+    const actor = { userId: req.user!.userId, userName: req.user!.userName || 'Admin' };
+
+    // What this run does to any fund with a target. Asked before billing, so
+    // over-collection is a decision rather than a discovery.
+    const fundImpact = await projectRunFundImpact(societyId, { chargeHeadIds, flatIds }, actor);
+    const breaches = fundImpact.filter(f => f.overByPaise > 0);
+
+    // A real run that would push a fund past its target needs saying so out loud.
+    // Money taken from members beyond what the society said it needed is hard to
+    // explain afterwards and harder to give back.
+    if (!dryRun && breaches.length && !confirmOverTarget) {
+      res.status(409).json({
+        error: breaches
+          .map(f => `${f.fundName} would reach ₹${(f.projectedPaise / 100).toLocaleString('en-IN')} against a target of ₹${(f.targetAmountPaise / 100).toLocaleString('en-IN')} — ₹${(f.overByPaise / 100).toLocaleString('en-IN')} more than needed.`)
+          .join(' ') + ' Tick the confirmation to bill it anyway.',
+        requiresConfirmation: true,
+        fundImpact,
+      });
+      return;
+    }
+
     const result = await generateInvoicesForSociety(societyId, {
       period, chargeHeadIds, flatIds, dryRun,
       triggeredByUserId: req.user!.userId,
       triggeredByName: req.user!.userName || 'Admin',
     });
     if (!dryRun && result.created > 0) auditFinance(req, 'FINANCE_GENERATE_INVOICES', 'MaintenanceInvoice', societyId, { newValues: { period: result.period, created: result.created, totalBilledPaise: result.totalBilledPaise } });
-    res.json(result);
+    res.json({ ...result, fundImpact });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+};
+
+/**
+ * POST /invoices/special-demand — raise a one-off levy mid-month.
+ *
+ * Its own endpoint rather than a flag on generate: the two are different acts.
+ * A regular run bills whatever is due this month; this bills one named thing,
+ * to a chosen set of flats, for a stated reason, and must never be triggered by
+ * the cron. Keeping them apart means the monthly path cannot accidentally
+ * inherit special-demand behaviour, or the reverse.
+ */
+export const raiseSpecialDemand = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const societyId = req.user?.activeTenantId;
+    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
+
+    const { chargeHeadIds, flatIds, blockIds, title, dueDate, dryRun, confirmOverTarget } = req.body;
+    const actor = { userId: req.user!.userId, userName: req.user!.userName || 'Admin' };
+
+    const fundImpact = await projectRunFundImpact(societyId, { chargeHeadIds, flatIds }, actor);
+    const breaches = fundImpact.filter(f => f.overByPaise > 0);
+    if (!dryRun && breaches.length && !confirmOverTarget) {
+      res.status(409).json({
+        error: breaches
+          .map(f => `${f.fundName} would reach ₹${(f.projectedPaise / 100).toLocaleString('en-IN')} against a target of ₹${(f.targetAmountPaise / 100).toLocaleString('en-IN')} — ₹${(f.overByPaise / 100).toLocaleString('en-IN')} more than needed.`)
+          .join(' ') + ' Tick the confirmation to bill it anyway.',
+        requiresConfirmation: true,
+        fundImpact,
+      });
+      return;
+    }
+
+    const result = await generateInvoicesForSociety(societyId, {
+      chargeHeadIds, flatIds, dryRun,
+      specialDemand: { title, dueDate, blockIds },
+      triggeredByUserId: req.user!.userId,
+      triggeredByName: req.user!.userName || 'Admin',
+    });
+    if (!dryRun && result.created > 0) {
+      auditFinance(req, 'FINANCE_SPECIAL_DEMAND', 'MaintenanceInvoice', societyId, {
+        newValues: { period: result.period, title, created: result.created, totalBilledPaise: result.totalBilledPaise },
+      });
+    }
+    res.json({ ...result, fundImpact });
   } catch (error: any) {
     res.status(400).json({ error: error.message });
   }

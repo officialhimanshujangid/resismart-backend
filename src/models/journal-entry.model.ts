@@ -91,6 +91,10 @@ JournalEntrySchema.index({ societyId: 1, voucherNumber: 1 }, { unique: true });
 JournalEntrySchema.index({ societyId: 1, entryDate: -1 });
 JournalEntrySchema.index({ societyId: 1, voucherType: 1, financialYear: 1 });
 JournalEntrySchema.index({ sourceType: 1, sourceId: 1 });
+// The vendor sub-ledger. `2200 Sundry Creditors` is declared VENDOR-dimensioned
+// and every expense line carries a vendorId, but nothing could query it without
+// unwinding the whole journal.
+JournalEntrySchema.index({ societyId: 1, 'lines.vendorId': 1, entryDate: -1 });
 
 export const JournalEntry = mongoose.model<IJournalEntry>('JournalEntry', JournalEntrySchema);
 export default JournalEntry;

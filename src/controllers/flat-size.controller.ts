@@ -8,7 +8,7 @@ export const createFlatSize = async (req: Request, res: Response, next: NextFunc
   try {
     const userId = req.user?.userId;
     const societyId = req.user?.activeTenantId;
-    const { name, details } = req.body;
+    const { name, details, carpetAreaSqft, builtUpAreaSqft } = req.body;
 
     if (!userId || !societyId) {
       res.status(401).json({ error: 'Missing tenant or user details' });
@@ -29,6 +29,8 @@ export const createFlatSize = async (req: Request, res: Response, next: NextFunc
     const newFlatSize = new FlatSize({
       name,
       details,
+      carpetAreaSqft,
+      builtUpAreaSqft,
       societyId: new mongoose.Types.ObjectId(societyId),
       createdBy: new mongoose.Types.ObjectId(userId),
       updatedBy: new mongoose.Types.ObjectId(userId),
@@ -63,7 +65,7 @@ export const getFlatSizes = async (req: Request, res: Response, next: NextFuncti
 export const updateFlatSize = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { sizeId } = req.params;
-    const { name, details } = req.body;
+    const { name, details, carpetAreaSqft, builtUpAreaSqft } = req.body;
     const userId = req.user?.userId;
     const societyId = req.user?.activeTenantId;
 
@@ -90,6 +92,9 @@ export const updateFlatSize = async (req: Request, res: Response, next: NextFunc
     if (details !== undefined) {
       flatSize.details = details;
     }
+    // Every flat of this size bills off these, so a correction here fixes them all.
+    if (carpetAreaSqft !== undefined) flatSize.carpetAreaSqft = carpetAreaSqft;
+    if (builtUpAreaSqft !== undefined) flatSize.builtUpAreaSqft = builtUpAreaSqft;
 
     flatSize.updatedBy = new mongoose.Types.ObjectId(userId);
     await flatSize.save();

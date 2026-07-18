@@ -28,7 +28,36 @@ function isApplicable(head: IChargeHead, flat: IFlat): boolean {
   return true;
 }
 
-function computeBase(head: IChargeHead, flat: IFlat, meterUnits: number, maintenanceBasePaise: number, runningBasePaise: number): number {
+/**
+ * The area to bill a flat on. It lives on the flat's SIZE, and only there.
+ *
+ * A society defines a handful of sizes and every flat of that size shares the
+ * measurement, so it is entered once rather than two hundred times — and a
+ * correction fixes every flat at once. Two layouts that genuinely differ are two
+ * sizes ("1BHK 1200", "1BHK 1500"), which is how a committee already names them.
+ *
+ * Deliberately no per-flat override: a second place to put the same number is a
+ * second number to keep in step, and the one nobody remembers to update is the
+ * one that bills.
+ *
+ * One helper because the pricing engine and the "why is this flat billed ₹0"
+ * warning must never disagree about what the area is.
+ */
+export function effectiveArea(
+  size: { carpetAreaSqft?: number; builtUpAreaSqft?: number } | undefined,
+  basis?: 'CARPET' | 'BUILTUP',
+): number | undefined {
+  return basis === 'BUILTUP' ? size?.builtUpAreaSqft : size?.carpetAreaSqft;
+}
+
+function computeBase(
+  head: IChargeHead,
+  flat: IFlat,
+  meterUnits: number,
+  maintenanceBasePaise: number,
+  runningBasePaise: number,
+  size?: { carpetAreaSqft?: number; builtUpAreaSqft?: number },
+): number {
   switch (head.pricingMode) {
     case 'UNIFORM':
     case 'FLAT_ADHOC':
@@ -37,8 +66,12 @@ function computeBase(head: IChargeHead, flat: IFlat, meterUnits: number, mainten
       const m = head.perSizeAmounts?.find((s) => s.flatSizeId.toString() === flat.size?.toString());
       return m ? m.amountPaise : (head.uniformAmountPaise ?? 0);
     }
+    case 'PER_BLOCK': {
+      const m = head.perBlockAmounts?.find((b) => b.blockId.toString() === flat.blockId?.toString());
+      return m ? m.amountPaise : (head.uniformAmountPaise ?? 0);
+    }
     case 'PER_SQFT': {
-      const area = head.areaBasis === 'BUILTUP' ? flat.builtUpAreaSqft : flat.carpetAreaSqft;
+      const area = effectiveArea(size, head.areaBasis);
       if (!area || !head.ratePerSqftPaise) return 0;
       return Math.round(area * head.ratePerSqftPaise);
     }
@@ -191,6 +224,123 @@ async function getFlatAdvance(societyId: string, flatId: any): Promise<number> {
   return Math.max(0, agg[0]?.net || 0);
 }
 
+/**
+ * Why a head that applies to this flat priced at zero.
+ *
+ * Only reports gaps a human can fix. A metered head with no reading this month
+ * is not a misconfiguration — the reading simply is not in yet — so it stays
+ * quiet rather than crying wolf every billing run.
+ */
+function unbilledReason(
+  head: IChargeHead,
+  flat: IFlat,
+  size?: { carpetAreaSqft?: number; builtUpAreaSqft?: number },
+): string | null {
+  switch (head.pricingMode) {
+    case 'PER_FLAT_SIZE':
+      if (!flat.size) return 'no flat size set on this flat';
+      if (!head.perSizeAmounts?.some(s => s.flatSizeId.toString() === flat.size?.toString())) {
+        return 'no amount set for this flat\'s size';
+      }
+      return 'amount for this size is zero';
+    case 'PER_BLOCK':
+      if (!flat.blockId) return 'this flat is not linked to a wing';
+      if (!head.perBlockAmounts?.some(b => b.blockId.toString() === flat.blockId?.toString())) {
+        return 'no amount set for this flat\'s wing';
+      }
+      return 'amount for this wing is zero';
+    case 'PER_SQFT': {
+      const area = effectiveArea(size, head.areaBasis);
+      const which = head.areaBasis === 'BUILTUP' ? 'built-up' : 'carpet';
+      if (!area) {
+        // Point at the size, because that is where the fix belongs — correcting
+        // it once there fixes every flat of that size at the same time.
+        return flat.size
+          ? `no ${which} area on this flat's size — set it in Flat Sizes`
+          : `no flat size chosen, so there is no ${which} area to bill on`;
+      }
+      if (!head.ratePerSqftPaise) return 'no per-sqft rate set on the charge head';
+      return null;
+    }
+    case 'PER_QUANTITY':
+      if (!head.quantityKey) return 'no quantity key set on the charge head';
+      if (!flat.quantities?.[head.quantityKey]) return `this flat has no "${head.quantityKey}" recorded`;
+      return null;
+    case 'UNIFORM':
+    case 'FLAT_ADHOC':
+      return head.uniformAmountPaise ? null : 'no amount set on the charge head';
+    case 'PERCENTAGE':
+      return head.percentValue ? null : 'no percentage set on the charge head';
+    default:
+      // METERED with no reading yet — expected, not a gap.
+      return null;
+  }
+}
+
+/** A flat a head applied to but could not price. */
+export interface UnbilledFlat {
+  flatId: string;
+  flat: string;
+  chargeHeadCode: string;
+  chargeHeadName: string;
+  reason: string;
+}
+
+/**
+ * The next free `YYYY-MM-Sn` for a month.
+ *
+ * A special demand cannot reuse the month's own key: `{society, flat, period}` is
+ * unique, and a second run against `2026-07` is not an error but a silent no-op —
+ * every flat is simply "already invoiced" and the caller gets `created: 0`.
+ * Suffixing the period sidesteps that without touching the index, exactly as
+ * opening dues already do with `OPENING`.
+ */
+async function nextSpecialPeriod(societyId: string, month: string): Promise<string> {
+  const existing = await MaintenanceInvoice.find({
+    societyId: oid(societyId),
+    billingPeriod: { $regex: `^${month}-S\\d+$` },
+  }).select('billingPeriod').lean();
+
+  const highest = existing.reduce((max, i) => {
+    const n = Number(i.billingPeriod.split('-S')[1] || 0);
+    return Number.isFinite(n) ? Math.max(max, n) : max;
+  }, 0);
+  return `${month}-S${highest + 1}`;
+}
+
+/**
+ * How much of this flat's contribution THIS CALENDAR MONTH already counts toward
+ * the ₹7,500 RWA exemption.
+ *
+ * The exemption is tested per member per month, but the engine only ever sees one
+ * invoice at a time. Left alone, a ₹500 special demand looks like the member's
+ * entire month and escapes GST it may well owe — so the month's earlier bills are
+ * added back in before the test.
+ */
+async function priorExemptionBaseThisMonth(societyId: string, flatId: any, month: string): Promise<number> {
+  const invoices = await MaintenanceInvoice.find({
+    societyId: oid(societyId), flatId,
+    billingPeriod: { $regex: `^${month}` },
+  }).select('lineItems').lean();
+  if (!invoices.length) return 0;
+
+  // `countsTowardRwaExemption` lives on the charge head, not the invoice line —
+  // property tax and common-area electricity are excluded from the computation.
+  const headIds = [...new Set(
+    invoices.flatMap(i => (i.lineItems || []).map(li => li.chargeHeadId).filter(Boolean).map(String)),
+  )];
+  const heads = headIds.length
+    ? await ChargeHead.find({ _id: { $in: headIds } }).select('countsTowardRwaExemption').lean()
+    : [];
+  const excluded = new Set(heads.filter(h => h.countsTowardRwaExemption === false).map(h => String(h._id)));
+
+  return invoices.reduce((sum, inv) => sum + (inv.lineItems || []).reduce((s, li) => {
+    if (!li.isPostable) return s;                                   // arrears display line
+    if (li.chargeHeadId && excluded.has(String(li.chargeHeadId))) return s;
+    return s + (li.baseAmountPaise || 0);
+  }, 0), 0);
+}
+
 export interface GenerateOpts {
   period?: string;
   chargeHeadIds?: string[];
@@ -198,6 +348,13 @@ export interface GenerateOpts {
   dryRun?: boolean;
   triggeredByUserId?: string;
   triggeredByName?: string;
+  /**
+   * Raise a one-off demand alongside the month's regular bill — a lift repair,
+   * an urgent painting contract. Gets its own `YYYY-MM-Sn` period, and
+   * deliberately carries NO interest and NO arrears line: see the notes at each
+   * suppression point.
+   */
+  specialDemand?: { title: string; dueDate?: string; blockIds?: string[] };
 }
 
 export interface GenerateResult {
@@ -206,6 +363,8 @@ export interface GenerateResult {
   skipped: number;
   totalBilledPaise: number;
   errors: string[];
+  /** Flats a charge head applied to but could not price. Setup gaps, not bills. */
+  unbilled: UnbilledFlat[];
 }
 
 /**
@@ -221,14 +380,18 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
   const startMonth = policy.financialYear?.startMonth ?? 4;
 
   const now = new Date();
-  const period = opts.period || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  const [py, pm] = period.split('-').map(Number);
+  const special = opts.specialDemand;
+  const month = opts.period || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // A special demand gets its own suffixed key so it cannot collide with the
+  // month's regular bill on the unique {society, flat, period} index.
+  const period = special ? await nextSpecialPeriod(societyId, month) : month;
+  const [py, pm] = month.split('-').map(Number);
   const periodStart = new Date(py, pm - 1, 1);
   const periodEnd = new Date(py, pm, 0, 23, 59, 59, 999);
 
   const invoiceDate = now;
-  const dueDate = new Date(now);
-  dueDate.setDate(dueDate.getDate() + (policy.billing?.dueDays ?? 15));
+  const dueDate = special?.dueDate ? new Date(special.dueDate) : new Date(now);
+  if (!special?.dueDate) dueDate.setDate(dueDate.getDate() + (policy.billing?.dueDays ?? 15));
   dueDate.setHours(23, 59, 59, 999);
   const { fyString } = getFinancialYear(invoiceDate, startMonth);
 
@@ -244,19 +407,22 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
   }
   const heads = (await ChargeHead.find(headQuery).lean<IChargeHead[]>())
     .sort((a, b) => (a.pricingMode === 'PERCENTAGE' ? 1 : 0) - (b.pricingMode === 'PERCENTAGE' ? 1 : 0) || a.sortOrder - b.sortOrder);
-  if (!heads.length) return { period, created: 0, skipped: 0, totalBilledPaise: 0, errors: ['No active charge heads'] };
+  if (!heads.length) return { period, created: 0, skipped: 0, totalBilledPaise: 0, errors: ['No active charge heads'], unbilled: [] };
 
   const flatQuery: any = { societyId };
   if (opts.flatIds?.length) flatQuery._id = { $in: opts.flatIds };
+  // A special demand is often one wing's problem — a lift, a tower's own pump.
+  if (special?.blockIds?.length) flatQuery.blockId = { $in: special.blockIds.map(oid) };
   const flats = await Flat.find(flatQuery).lean<IFlat[]>();
-  if (!flats.length) return { period, created: 0, skipped: 0, totalBilledPaise: 0, errors: ['No flats found'] };
+  if (!flats.length) return { period, created: 0, skipped: 0, totalBilledPaise: 0, errors: ['No flats found'], unbilled: [] };
 
   // Denormalization lookups
   const sizeIds = [...new Set(flats.map((f) => f.size?.toString()).filter(Boolean))] as string[];
   const ownerIds = [...new Set(flats.map((f) => f.ownerUserId?.toString()).filter(Boolean))] as string[];
-  const sizeDocs = sizeIds.length ? await FlatSize.find({ _id: { $in: sizeIds } }).select('name').lean() : [];
+  const sizeDocs = sizeIds.length ? await FlatSize.find({ _id: { $in: sizeIds } }).select('name carpetAreaSqft builtUpAreaSqft').lean() : [];
   const ownerDocs = ownerIds.length ? await User.find({ _id: { $in: ownerIds } }).select('name').lean() : [];
   const sizeLabelById = new Map(sizeDocs.map((s) => [s._id.toString(), s.name]));
+  const sizeById = new Map(sizeDocs.map((s) => [s._id.toString(), s]));
   const ownerNameById = new Map(ownerDocs.map((u) => [u._id.toString(), u.name]));
 
   // Existing invoices for this period → idempotency
@@ -265,6 +431,7 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
 
   let created = 0, skipped = 0, totalBilledPaise = 0;
   const errors: string[] = [];
+  const unbilled: UnbilledFlat[] = [];
 
   for (const flat of flats) {
     if (existingFlatIds.has((flat._id as any).toString())) { skipped++; continue; }
@@ -291,16 +458,38 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
       for (const head of heads) {
         if (!isApplicable(head, flat)) continue;
         const meterUnits = meterByHead.get((head._id as any).toString()) || 0;
-        const base = computeBase(head, flat, meterUnits, maintenanceBasePaise, runningBasePaise);
-        if (base <= 0) continue;
+        const flatSize = flat.size ? sizeById.get(flat.size.toString()) : undefined;
+        const base = computeBase(head, flat, meterUnits, maintenanceBasePaise, runningBasePaise, flatSize);
+        if (base <= 0) {
+          // A head that applies to this flat but prices at nothing is almost
+          // always a gap in the setup, not a deliberate free ride — a flat with
+          // no size, a wing nobody put a rate against, an area never measured.
+          // It used to vanish silently; now the preview can name it.
+          const why = unbilledReason(head, flat, flatSize);
+          if (why) unbilled.push({
+            flatId: String(flat._id),
+            flat: `${flat.blockName} ${flat.number}`.trim(),
+            chargeHeadCode: head.code,
+            chargeHeadName: head.name,
+            reason: why,
+          });
+          continue;
+        }
         if (head.category === 'MAINTENANCE') maintenanceBasePaise += base;
         runningBasePaise += base;
         priced.push({ head, base, meterUnits });
       }
 
+      // The ₹7,500 exemption is per member per MONTH, but this loop only sees one
+      // invoice. On a special demand the month's earlier bills are added back in,
+      // or a small mid-month levy would look like the member's whole month and
+      // escape GST the society may owe on it.
+      const priorBase = special && policy.gst?.enabled
+        ? await priorExemptionBaseThisMonth(societyId, flat._id, month)
+        : 0;
       const exemptionCountingBase = priced
         .filter(p => p.head.countsTowardRwaExemption !== false)
-        .reduce((s, p) => s + p.base, 0);
+        .reduce((s, p) => s + p.base, 0) + priorBase;
       const gstApplicableBase = priced.filter(p => p.head.gstApplicable).reduce((s, p) => s + p.base, 0);
       const fraction = taxableFraction(exemptionCountingBase, gstApplicableBase, policy);
 
@@ -339,7 +528,15 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
       // The one place `compounding` decides anything: simple interest is charged
       // on unpaid dues only, compound on dues plus the interest already levied.
       const interestBasePaise = policy.lateFee?.compounding === 'COMPOUND' ? arrearsPaise : principalArrearsPaise;
-      const interestPaise = computeInterest(interestBasePaise, policy, maxDaysOverdue);
+      //
+      // A special demand levies NO interest, deliberately.
+      //
+      // Interest is charged on the outstanding balance, not on a period, so a
+      // second invoice in the same month would run the monthly charge a second
+      // time against the same unpaid dues — two months' penalty in one month.
+      // `capPerInvoicePaise` would not save it either: that caps per invoice, not
+      // per month. And penal interest on a fresh painting levy is simply wrong.
+      const interestPaise = special ? 0 : computeInterest(interestBasePaise, policy, maxDaysOverdue);
       if (interestPaise > 0) {
         lineItems.push({
           code: 'INT', name: 'Interest on Arrears', category: 'INTEREST',
@@ -351,11 +548,25 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
         });
       }
 
-      // Skip flats with no current charges AND no arrears
-      if (subTotalPaise === 0 && interestPaise === 0 && arrearsPaise === 0) { skipped++; continue; }
+      // Skip a flat with nothing to charge this period.
+      //
+      // Arrears deliberately do NOT keep a flat in: the arrears line is display
+      // only (`isPostable: false`) and excluded from the total, so an
+      // arrears-only invoice comes to ₹0 — leaving a single ₹0 Debtors line,
+      // which `postJournal` rightly refuses ("exactly one of debit or credit").
+      // The whole invoice then failed for that flat, visible only as a line in
+      // the server log. The arrears are already tracked on the invoices that
+      // raised them, and Defaulters reads those, so nothing is lost by skipping.
+      if (subTotalPaise === 0 && interestPaise === 0) { skipped++; continue; }
 
-      // Arrears display line (not posted — already in Debtors)
-      if (arrearsPaise > 0) {
+      // Arrears display line (not posted — already in Debtors).
+      //
+      // Suppressed on a special demand: this month's own regular bill is still
+      // open, so it would be restated here as "Arrears Brought Forward" days
+      // after it was issued — which reads to a member as being billed twice.
+      // The money is unaffected either way (the line is never posted), but the
+      // document has to be honest.
+      if (arrearsPaise > 0 && !special) {
         lineItems.push({
           code: 'ARR', name: 'Arrears Brought Forward', category: 'ARREARS_BF',
           baseAmountPaise: arrearsPaise, gstApplicable: false,
@@ -416,6 +627,7 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
             invoiceNumber,
             financialYear: fyString,
             billingPeriod: period,
+            demandTitle: special?.title,
             periodStart,
             periodEnd,
             invoiceDate,
@@ -438,7 +650,14 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
               policy.allocation?.interestOrder || 'PRINCIPAL_FIRST',
               advanceAppliedPaise, totalPaise, interestPaise,
             ).toInterestPaise,
-            status: 'ISSUED',
+            // Advance applied at issue settles the bill exactly as a payment does,
+            // so the status has to say so. Hard-coding ISSUED left a bill with
+            // ₹0 outstanding sitting on the member's portal as though it were
+            // still owed — the same rule `allocateFifo` already applies when a
+            // receipt clears one.
+            status: outstandingPaise <= 0
+              ? 'PAID'
+              : advanceAppliedPaise > 0 ? 'PARTIALLY_PAID' : 'ISSUED',
             generatedBy: opts.triggeredByUserId ? 'MANUAL' : 'CRON',
             generatedByUserId: opts.triggeredByUserId,
           }], { session });
@@ -491,5 +710,5 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
     }
   }
 
-  return { period, created, skipped, totalBilledPaise, errors };
+  return { period, created, skipped, totalBilledPaise, errors, unbilled };
 }

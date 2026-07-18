@@ -447,7 +447,7 @@ export const downloadBulkUploadTemplate = async (req: Request, res: Response, ne
     }
 
     const blocks = await Block.find({ societyId: new mongoose.Types.ObjectId(societyId) }).select('name').lean();
-    const flatSizes = await FlatSize.find({ societyId: new mongoose.Types.ObjectId(societyId) }).select('name details').lean();
+    const flatSizes = await FlatSize.find({ societyId: new mongoose.Types.ObjectId(societyId) }).select('name details carpetAreaSqft builtUpAreaSqft').lean();
 
     const blockNames = blocks.map(b => b.name);
     const sizeNames = flatSizes.map(s => `${s.name}${s.details ? ` (${s.details})` : ''}`);

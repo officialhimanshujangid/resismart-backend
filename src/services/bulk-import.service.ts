@@ -3,6 +3,7 @@ import * as xlsx from 'xlsx';
 import ExcelJS from 'exceljs';
 import { Flat, FlatStatus } from '../models/flat.model';
 import { Block } from '../models/block.model';
+import { FlatSize } from '../models/flat-size.model';
 import { ShareCertificate } from '../models/share-certificate.model';
 import { JournalEntry } from '../models/journal-entry.model';
 import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
@@ -84,8 +85,9 @@ const COLUMNS: Record<ImportKind, ColumnSpec[]> = {
     { header: 'Block', required: true },
     { header: 'Flat Number', required: true },
     { header: 'Status', required: true },
-    { header: 'Carpet Area Sqft', required: false },
-    { header: 'Built-up Area Sqft', required: false },
+    // The size carries the carpet/built-up area, so it is named here rather than
+    // typed per row — one measurement per layout instead of one per flat.
+    { header: 'Size', required: false },
   ],
   MEMBERS: [
     { header: 'Block', required: true },
@@ -102,7 +104,7 @@ const COLUMNS: Record<ImportKind, ColumnSpec[]> = {
 };
 
 const EXAMPLE_ROW: Record<ImportKind, Record<string, string | number>> = {
-  FLATS: { 'Block': 'A Wing', 'Flat Number': '101', 'Status': 'OWNER_OCCUPIED', 'Carpet Area Sqft': 620, 'Built-up Area Sqft': 750 },
+  FLATS: { 'Block': 'A Wing', 'Flat Number': '101', 'Status': 'OWNER_OCCUPIED', 'Size': '2BHK 1600' },
   MEMBERS: { 'Block': 'A Wing', 'Flat Number': '101', 'Member Name': 'Asha Rao', 'Shares': 5, 'Face Value': 50 },
   OPENING_DUES: { 'Block': 'A Wing', 'Flat Number': '101', 'Amount Due': 12500.5 },
 };
@@ -129,10 +131,9 @@ const HEADER_ALIASES: Record<string, string> = {
   status: 'Status',
   occupancy: 'Status',
   occupancystatus: 'Status',
-  carpetareasqft: 'Carpet Area Sqft',
-  carpetarea: 'Carpet Area Sqft',
-  builtupareasqft: 'Built-up Area Sqft',
-  builtuparea: 'Built-up Area Sqft',
+  size: 'Size',
+  flatsize: 'Size',
+  sizename: 'Size',
   membername: 'Member Name',
   member: 'Member Name',
   name: 'Member Name',
@@ -248,14 +249,6 @@ function toCount(raw: string, label: string): number {
   return Number(s);
 }
 
-/** Blank, or the column missing entirely, both mean "not measured" — not an error. */
-function toOptionalArea(raw: string, label: string): number | undefined {
-  const s = cell(raw).replace(/,/g, '');
-  if (!s) return undefined;
-  if (!/^\d+(\.\d+)?$/.test(s)) throw new RowError(`${label} "${raw}" must be a number`);
-  return Number(s);
-}
-
 function requireText(raw: string, label: string): string {
   const s = cell(raw);
   if (!s) throw new RowError(`${label} is required`);
@@ -273,7 +266,7 @@ const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
 /** One validated row, carrying the parsed values commit will act on. */
 interface Planned<T> extends PreviewRow { parsed?: T }
 
-interface FlatRow { blockName: string; number: string; status: FlatStatus; carpetAreaSqft?: number; builtUpAreaSqft?: number }
+interface FlatRow { blockName: string; number: string; status: FlatStatus; sizeId?: mongoose.Types.ObjectId }
 interface MemberRow { flatId: string; memberName: string; shareCount: number; faceValuePaise: number }
 interface DuesRow { flatId: string; blockName: string; number: string; amountPaise: number }
 
@@ -292,6 +285,10 @@ async function plan(societyId: string, kind: ImportKind, rows: Record<string, st
 async function planFlats(societyId: string, rows: Record<string, string>[]): Promise<Planned<FlatRow>[]> {
   const existing = await Flat.find({ societyId: oid(societyId) }).select('number blockName').lean();
   const existingKeys = new Set(existing.map(f => flatKey(f.blockName, f.number)));
+  // Sizes are named in the file, so they are resolved once here rather than
+  // queried per row.
+  const sizes = await FlatSize.find({ societyId: oid(societyId) }).select('name').lean();
+  const sizeByName = new Map(sizes.map(z => [z.name.trim().toLowerCase(), z._id]));
   const seen = new Map<string, number>();
   const validStatuses = Object.values(FlatStatus);
 
@@ -307,8 +304,15 @@ async function planFlats(societyId: string, rows: Record<string, string>[]): Pro
       if (!validStatuses.includes(status)) {
         throw new RowError(`Status "${data['Status']}" is not valid — use ${validStatuses.join(', ')}`);
       }
-      const carpetAreaSqft = toOptionalArea(data['Carpet Area Sqft'], 'Carpet Area Sqft');
-      const builtUpAreaSqft = toOptionalArea(data['Built-up Area Sqft'], 'Built-up Area Sqft');
+      // A named size that does not exist is a typo worth stopping on: silently
+      // creating the flat without one leaves it unbillable per square foot.
+      const sizeName = cell(data['Size']);
+      let sizeId: mongoose.Types.ObjectId | undefined;
+      if (sizeName) {
+        const match = sizeByName.get(sizeName.trim().toLowerCase());
+        if (!match) throw new RowError(`No flat size named "${sizeName}" — create it under Flat Sizes first`);
+        sizeId = match;
+      }
 
       const key = flatKey(blockName, number);
       const dupOf = seen.get(key);
@@ -321,7 +325,7 @@ async function planFlats(societyId: string, rows: Record<string, string>[]): Pro
       return {
         rowNumber, data, status: 'CREATE' as const,
         message: `Add ${blockName} ${number}`,
-        parsed: { blockName, number, status, carpetAreaSqft, builtUpAreaSqft },
+        parsed: { blockName, number, status, sizeId },
       };
     } catch (e: any) {
       return { rowNumber, data, status: 'ERROR' as const, message: e.message };
@@ -549,8 +553,7 @@ async function commitFlats(societyId: string, planned: Planned<FlatRow>[], actor
     blockId: blockByName.get(f.blockName.trim().toLowerCase()),
     societyId: oid(societyId),
     status: f.status,
-    carpetAreaSqft: f.carpetAreaSqft,
-    builtUpAreaSqft: f.builtUpAreaSqft,
+    size: f.sizeId,
     createdBy: oid(actor.userId), createdByName: actor.userName,
     updatedBy: oid(actor.userId), updatedByName: actor.userName,
   }));

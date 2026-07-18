@@ -103,12 +103,26 @@ export const payOnline = async (req: Request, res: Response): Promise<void> => {
 
     const open = await MaintenanceInvoice.find({ flatId, outstandingPaise: { $gt: 0 }, status: { $in: ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] } }).lean();
     const totalOutstanding = open.reduce((s, i) => s + i.outstandingPaise, 0);
-    const amountPaise = Number(req.body.amountPaise) || totalOutstanding;
-    if (amountPaise <= 0) { res.status(400).json({ error: 'Nothing outstanding to pay' }); return; }
-    if (amountPaise > totalOutstanding + 0) { /* allow advance top-up */ }
 
-    // Idempotency: reuse a live gateway link if one is already open for this flat.
-    const existing = await Receipt.findOne({ flatId, status: 'INITIATED', mode: 'RAZORPAY', razorpayPaymentLinkUrl: { $exists: true, $ne: null } });
+    // An explicit amount wins, so a member can pay ahead — six months before
+    // going abroad, or a round figure. Anything above the dues becomes advance
+    // credit at allocation time and is applied to their next bill.
+    // Without an explicit amount we bill exactly what is owed.
+    const requested = Number(req.body.amountPaise);
+    const amountPaise = Number.isFinite(requested) && requested > 0 ? Math.round(requested) : totalOutstanding;
+    if (amountPaise <= 0) {
+      res.status(400).json({ error: 'Nothing outstanding to pay. Enter an amount if you want to pay in advance.' });
+      return;
+    }
+
+    // Idempotency: reuse a live gateway link only when it is for the SAME amount.
+    // Matching on the flat alone handed back a stale link — a member who opened
+    // a ₹1,000 link and then chose to pay ₹6,000 in advance would be sent to pay
+    // ₹1,000 again, with no hint as to why.
+    const existing = await Receipt.findOne({
+      flatId, status: 'INITIATED', mode: 'RAZORPAY', amountPaise,
+      razorpayPaymentLinkUrl: { $exists: true, $ne: null },
+    });
     if (existing?.razorpayPaymentLinkUrl) { res.json({ paymentLinkUrl: existing.razorpayPaymentLinkUrl, receiptId: existing._id }); return; }
 
     const flat = await Flat.findOne({ _id: flatId, societyId }).select('number blockName').lean();
@@ -142,18 +156,32 @@ export const reportOffline = async (req: Request, res: Response): Promise<void> 
   try {
     const { flatId, societyId } = ctx(req);
     if (!flatId || !societyId) { res.status(403).json({ error: 'No active flat' }); return; }
-    const { mode, amountPaise, referenceNote, instrument } = req.body;
+    const { mode, amountPaise, referenceNote, instrument, payAdvance } = req.body;
 
     const open = await MaintenanceInvoice.find({ flatId, outstandingPaise: { $gt: 0 }, status: { $in: ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] } }).lean();
     const totalOutstanding = open.reduce((s, i) => s + i.outstandingPaise, 0);
-    // Include amounts already awaiting confirmation so a bill can't be over-reported.
+    // Amounts already awaiting confirmation count against the dues, so the same
+    // bill cannot be reported as paid twice while the committee is still looking
+    // at the first claim.
     const pending = await Receipt.aggregate([
       { $match: { flatId: new mongoose.Types.ObjectId(flatId), status: 'PENDING_CONFIRMATION' } },
       { $group: { _id: null, total: { $sum: '$amountPaise' } } },
     ]);
-    const room = totalOutstanding - (pending[0]?.total || 0);
-    if (room <= 0) { res.status(400).json({ error: 'Your dues are fully paid or awaiting confirmation' }); return; }
-    if (amountPaise > room) { res.status(400).json({ error: `Amount exceeds outstanding dues of ₹${(room / 100).toLocaleString('en-IN')}` }); return; }
+    const room = Math.max(0, totalOutstanding - (pending[0]?.total || 0));
+
+    // The over-reporting guard applies to the DUES portion only. Capping the
+    // whole amount at the dues meant a member could never pay ahead — and a
+    // society that cannot take a prepayment sends its members to the office.
+    // Anything above the dues is advance, and needs saying out loud.
+    const advancePortion = Math.max(0, amountPaise - room);
+    if (advancePortion > 0 && !payAdvance) {
+      res.status(400).json({
+        error: room > 0
+          ? `Your dues are ₹${(room / 100).toLocaleString('en-IN')}. To pay ₹${(amountPaise / 100).toLocaleString('en-IN')} and hold the extra ₹${(advancePortion / 100).toLocaleString('en-IN')} as advance credit, tick "paying in advance".`
+          : 'Your dues are fully paid or awaiting confirmation. Tick "paying in advance" to leave this with the society as credit against future bills.',
+      });
+      return;
+    }
 
     const flat = await Flat.findOne({ _id: flatId, societyId }).select('number blockName').lean();
     const receipt = await reportPendingReceipt(societyId, {

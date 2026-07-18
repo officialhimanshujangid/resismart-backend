@@ -20,7 +20,7 @@ export interface ResolvedGateway {
  *  - OFFLINE_ONLY: no gateway (record-keeping only)
  *  - OWN_KEYS: society's own Razorpay account — money never touches the platform;
  *    webhooks verified with the society's own secret at /webhooks/razorpay/society/:id
- *  - PLATFORM_ROUTE / PLATFORM_COLLECT_PAYOUT: platform account collects
+ *  - PLATFORM_COLLECT_PAYOUT: platform account collects, then settles to the society
  */
 export async function resolveGateway(societyId: string): Promise<ResolvedGateway> {
   const policy = await FinancePolicy.findOne({ societyId }).lean();
@@ -45,7 +45,7 @@ export async function resolveGateway(societyId: string): Promise<ResolvedGateway
     };
   }
 
-  if (mode === 'PLATFORM_ROUTE' || mode === 'PLATFORM_COLLECT_PAYOUT') {
+  if (mode === 'PLATFORM_COLLECT_PAYOUT') {
     return {
       mode, online: true, webhookSecret: appConfig.razorpayWebhookSecret || '',
       createLink: async (opts) => {

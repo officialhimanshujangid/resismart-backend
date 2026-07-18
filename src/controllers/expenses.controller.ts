@@ -7,37 +7,8 @@ import { auditFinance } from '../utils/finance-audit.util';
 
 const actorOf = (req: Request) => ({ userId: req.user!.userId, userName: req.user!.userName || 'Admin' });
 
-// ---- Vendors ----
-export const listVendors = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const societyId = req.user?.activeTenantId;
-    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
-    const vendors = await Vendor.find({ societyId }).sort({ name: 1 });
-    res.json(vendors);
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-};
-
-export const createVendor = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const societyId = req.user?.activeTenantId;
-    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
-    const vendor = await Vendor.create({ ...req.body, societyId, createdBy: req.user!.userId, createdByName: req.user!.userName || 'Admin' });
-    res.json(vendor);
-  } catch (e: any) {
-    if (e.code === 11000) { res.status(409).json({ error: 'A vendor with this name already exists' }); return; }
-    res.status(400).json({ error: e.message });
-  }
-};
-
-export const updateVendor = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const societyId = req.user?.activeTenantId;
-    if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
-    const vendor = await Vendor.findOneAndUpdate({ _id: req.params.id, societyId }, { $set: req.body }, { new: true });
-    if (!vendor) { res.status(404).json({ error: 'Vendor not found' }); return; }
-    res.json(vendor);
-  } catch (e: any) { res.status(400).json({ error: e.message }); }
-};
+// Vendor CRUD lives in vendor.controller.ts. It used to sit here with a blind
+// `$set: req.body` update and no way to reach most of the vendor's own fields.
 
 // ---- Expenses ----
 export const listExpenses = async (req: Request, res: Response): Promise<void> => {

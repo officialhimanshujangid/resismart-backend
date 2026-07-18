@@ -6,6 +6,7 @@ import { Flat } from '../models/flat.model';
 import { Society } from '../models/society.model';
 import { recordClearedReceipt, confirmReceipt, rejectReceipt, bounceReceipt, clearCheque } from '../services/collections.service';
 import { generateAndStoreReceiptPdf } from '../services/receipt.service';
+import { flatAdvanceBalance } from '../services/adjustments.service';
 import { auditFinance } from '../utils/finance-audit.util';
 import FinanceNotificationService from '../services/finance-notification.service';
 import { User } from '../models/user.model';
@@ -24,7 +25,11 @@ export const getFlatOutstanding = async (req: Request, res: Response): Promise<v
     if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
     const invoices = await flatOpenInvoices(societyId, req.params.flatId);
     const totalOutstandingPaise = invoices.reduce((s, i) => s + i.outstandingPaise, 0);
-    res.json({ totalOutstandingPaise, invoices });
+    // The refund screen reads this to show what is actually refundable. It was
+    // never returned, so every flat looked like it held no advance and the
+    // dialog said "nothing to refund" even when there was.
+    const advanceBalancePaise = await flatAdvanceBalance(societyId, req.params.flatId);
+    res.json({ totalOutstandingPaise, advanceBalancePaise, invoices });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

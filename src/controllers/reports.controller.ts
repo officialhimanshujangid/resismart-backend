@@ -68,6 +68,7 @@ const RUN: Record<string, (societyId: string, q: ReportQuery, fyStartMonth: numb
   'fund-statement': (s, q) => reports.fundStatement(s, { asOf: q.asOf }),
   'gst-register': (s, q) => reports.gstRegister(s, q.from, q.to),
   'tds-register': (s, q) => reports.tdsRegister(s, q.from, q.to),
+  'vendor-register': (s, q) => reports.vendorRegister(s, q.from, q.to),
   // Lives in budget.service, but it is a report like any other — registering it
   // here is what gives it the same JSON shape, PDF and Excel as the rest for free.
   'budget-vs-actual': (s, q, m) => runBudgetVsActual(s, { fy: q.fy, fyStartMonth: m }),
@@ -83,6 +84,7 @@ export const collectionRegister = handler((s, q, m) => RUN['collection-register'
 export const fundStatement = handler((s, q, m) => RUN['fund-statement'](s, q, m));
 export const gstRegister = handler((s, q, m) => RUN['gst-register'](s, q, m));
 export const tdsRegister = handler((s, q, m) => RUN['tds-register'](s, q, m));
+export const vendorRegister = handler((s, q, m) => RUN['vendor-register'](s, q, m));
 export const budgetVsActual = handler((s, q, m) => RUN['budget-vs-actual'](s, q, m));
 
 /** GET /reports/financial-years — drives the FY picker. */

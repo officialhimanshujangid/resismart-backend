@@ -19,7 +19,6 @@ export const getSettlement = async (req: Request, res: Response): Promise<void> 
       mode: s.mode,
       upiId: s.upiId || '',
       ownKeys: s.ownKeys?.keyId ? { keyId: s.ownKeys.keyId, hasSecret: !!s.ownKeys.keySecretEnc, hasWebhookSecret: !!s.ownKeys.webhookSecretEnc } : null,
-      routeAccountId: s.routeAccountId || '',
       payoutBank: s.payoutBank?.last4 ? { accountName: s.payoutBank.accountName, last4: s.payoutBank.last4, ifsc: s.payoutBank.ifsc, bankName: s.payoutBank.bankName } : null,
       webhookUrl: s.mode === 'OWN_KEYS' ? `${req.protocol}://${req.get('host')}/api/v1/webhooks/razorpay/society/${societyId}` : null,
     });
@@ -31,7 +30,7 @@ export const updateSettlement = async (req: Request, res: Response): Promise<voi
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(403).json({ error: 'No society selected' }); return; }
-    const { mode, upiId, keyId, keySecret, webhookSecret, routeAccountId, payoutAccountName, payoutAccountNumber, payoutIfsc, payoutBankName } = req.body;
+    const { mode, upiId, keyId, keySecret, webhookSecret, payoutAccountName, payoutAccountNumber, payoutIfsc, payoutBankName } = req.body;
 
     const policy = await getOrCreatePolicy(societyId, req.user!.userId, req.user!.userName || 'Admin');
     const s = policy.settlement;
@@ -46,10 +45,6 @@ export const updateSettlement = async (req: Request, res: Response): Promise<voi
       if (keyId) s.ownKeys!.keyId = keyId;
       if (keySecret) { const e = encryptSecret(keySecret); s.ownKeys!.keySecretEnc = e.ct; s.ownKeys!.keySecretIv = e.iv; s.ownKeys!.keySecretTag = e.tag; }
       if (webhookSecret) { const e = encryptSecret(webhookSecret); s.ownKeys!.webhookSecretEnc = e.ct; s.ownKeys!.webhookSecretIv = e.iv; s.ownKeys!.webhookSecretTag = e.tag; }
-    } else if (mode === 'PLATFORM_ROUTE') {
-      const finalRoute = routeAccountId || s.routeAccountId;
-      if (!finalRoute) throw new Error('Razorpay Route linked-account id (acc_...) is required');
-      s.routeAccountId = finalRoute;
     } else if (mode === 'PLATFORM_COLLECT_PAYOUT') {
       const hasSaved = !!s.payoutBank?.last4;
       if (!hasSaved && (!payoutAccountNumber || !payoutIfsc || !payoutAccountName || !payoutBankName)) {

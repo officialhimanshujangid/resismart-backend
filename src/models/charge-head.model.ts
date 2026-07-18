@@ -5,7 +5,7 @@ export type ChargeCategory =
   | 'WATER' | 'PARKING' | 'FESTIVAL' | 'NON_OCCUPANCY'
   | 'UTILITY' | 'ADHOC' | 'OTHER';
 
-export type PricingMode = 'UNIFORM' | 'PER_FLAT_SIZE' | 'PER_SQFT' | 'METERED' | 'PERCENTAGE' | 'FLAT_ADHOC' | 'PER_QUANTITY';
+export type PricingMode = 'UNIFORM' | 'PER_FLAT_SIZE' | 'PER_BLOCK' | 'PER_SQFT' | 'METERED' | 'PERCENTAGE' | 'FLAT_ADHOC' | 'PER_QUANTITY';
 export type Occupancy = 'ALL' | 'OWNER_OCCUPIED' | 'RENTED' | 'VACANT';
 export type BillTo = 'OWNER' | 'OCCUPANT';
 
@@ -19,6 +19,18 @@ export interface IChargeHead extends Document {
   pricingMode: PricingMode;
   uniformAmountPaise?: number;
   perSizeAmounts?: { flatSizeId: mongoose.Types.ObjectId; label: string; amountPaise: number }[];
+  /**
+   * PER_BLOCK — a different amount per wing.
+   *
+   * A tower with more floors has more external wall to paint and its own lift to
+   * service, so societies routinely split a levy by wing rather than equally.
+   * Until now the only way to express that was two charge heads with disjoint
+   * `applicability.blockIds` — and the edit form silently wiped that scoping.
+   *
+   * A block with no row here bills nothing, and the invoice preview names those
+   * flats rather than leaving them quietly unbilled.
+   */
+  perBlockAmounts?: { blockId: mongoose.Types.ObjectId; label: string; amountPaise: number }[];
   ratePerSqftPaise?: number;              // PER_SQFT (uses Flat.carpetAreaSqft)
   areaBasis?: 'CARPET' | 'BUILTUP';
   perUnitRatePaise?: number;              // METERED and PER_QUANTITY — the rate for one of whatever is counted
@@ -78,10 +90,15 @@ const ChargeHeadSchema = new Schema<IChargeHead>({
     required: true,
   },
 
-  pricingMode: { type: String, enum: ['UNIFORM', 'PER_FLAT_SIZE', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC', 'PER_QUANTITY'], required: true },
+  pricingMode: { type: String, enum: ['UNIFORM', 'PER_FLAT_SIZE', 'PER_BLOCK', 'PER_SQFT', 'METERED', 'PERCENTAGE', 'FLAT_ADHOC', 'PER_QUANTITY'], required: true },
   uniformAmountPaise: { type: Number, min: 0 },
   perSizeAmounts: [{
     flatSizeId: { type: Schema.Types.ObjectId, ref: 'FlatSize', required: true },
+    label: { type: String, required: true },
+    amountPaise: { type: Number, required: true, min: 0 },
+  }],
+  perBlockAmounts: [{
+    blockId: { type: Schema.Types.ObjectId, ref: 'Block', required: true },
     label: { type: String, required: true },
     amountPaise: { type: Number, required: true, min: 0 },
   }],
@@ -91,7 +108,9 @@ const ChargeHeadSchema = new Schema<IChargeHead>({
   meterType: { type: String },
   quantityKey: { type: String, trim: true },
   percentOf: { type: String, enum: ['MAINTENANCE', 'BASE'] },
-  percentValue: { type: Number, min: 0 },
+  // Capped here as well as in the validator: the 0-100 bound used to live only
+  // in Zod, so anything writing outside the HTTP layer could store 500%.
+  percentValue: { type: Number, min: 0, max: 100 },
 
   applicability: {
     occupancy: { type: [String], enum: ['ALL', 'OWNER_OCCUPIED', 'RENTED', 'VACANT'], default: ['ALL'] },

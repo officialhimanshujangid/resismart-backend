@@ -39,7 +39,13 @@ export interface IMaintenanceInvoice extends Document {
 
   invoiceNumber: string;
   financialYear: string;
-  billingPeriod: string;      // 'YYYY-MM'
+  /**
+   * 'YYYY-MM' for a regular bill, or 'YYYY-MM-Sn' for a special demand raised
+   * mid-month. Never parsed as a date — only matched exactly and printed.
+   */
+  billingPeriod: string;
+  /** Why a special demand was raised, in the member's words. */
+  demandTitle?: string;
   periodStart?: Date;
   periodEnd?: Date;
   invoiceDate: Date;
@@ -118,6 +124,7 @@ const MaintenanceInvoiceSchema = new Schema<IMaintenanceInvoice>({
   invoiceNumber: { type: String, required: true },
   financialYear: { type: String, required: true },
   billingPeriod: { type: String, required: true },
+  demandTitle: { type: String, trim: true },
   periodStart: { type: Date },
   periodEnd: { type: Date },
   invoiceDate: { type: Date, required: true },
