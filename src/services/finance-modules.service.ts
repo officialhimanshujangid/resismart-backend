@@ -28,8 +28,13 @@ const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
  */
 export const FINANCE_MODULES = [
   'EXPENSES', 'FUNDS', 'REFUNDS', 'SHARES', 'ASSETS', 'INVESTMENTS',
-  'BUDGET', 'BANKING', 'PDC', 'NOTICES', 'ACCOUNTING', 'IMPORT',
+  'BUDGET', 'BANKING', 'PDC', 'NOTICES', 'ACCOUNTING',
 ] as const;
+// IMPORT was here until bulk import moved inside the Setup hub, which must stay
+// visible even when every other finance screen is locked. A toggle that hides
+// nothing is a switch users can flip to no effect — worse than no switch. A
+// society still carrying 'IMPORT' in its saved list simply drops it: `isValid`
+// filters unknown names, which is what that filter has always been for.
 export type FinanceModule = typeof FINANCE_MODULES[number];
 
 /**
@@ -58,8 +63,7 @@ export const MODULE_CATALOG: ModuleInfo[] = [
   { key: 'BANKING', label: 'Bank reconciliation', blurb: 'Tick your books off against the bank statement.', pages: ['Bank Reconciliation'] },
   { key: 'PDC', label: 'Post-dated cheques', blurb: 'Cheques held for a future date.', pages: ['Post-dated Cheques'] },
   { key: 'NOTICES', label: 'Defaulter notices & recovery', blurb: 'Formal notices and recovery filings for members who do not pay.', pages: ['Defaulter Notices'] },
-  { key: 'ACCOUNTING', label: 'Full accounting tools', blurb: 'The chart of accounts, manual vouchers and opening balances. For a treasurer who knows double-entry.', pages: ['Chart of Accounts', 'Vouchers & Journal', 'Opening Balances'] },
-  { key: 'IMPORT', label: 'Bulk import', blurb: 'Load flats, members or opening dues from a spreadsheet. Mostly useful once, at setup.', pages: ['Bulk Import'] },
+  { key: 'ACCOUNTING', label: 'Full accounting tools', blurb: 'The chart of accounts and manual vouchers. For a treasurer who knows double-entry.', pages: ['Chart of Accounts', 'Vouchers & Journal'] },
 ];
 
 const isValid = (m: string): m is FinanceModule => (FINANCE_MODULES as readonly string[]).includes(m);

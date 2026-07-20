@@ -158,6 +158,30 @@ const HEADER_ALIASES: Record<string, string> = {
  * and there is no second parser to drift out of step with the first.
  */
 export function parseRows(kind: ImportKind, source: ImportSource): Record<string, string>[] {
+  return parseGrid(source, {
+    required: COLUMNS[kind].filter(c => c.required).map(c => c.header),
+    expected: columnsFor(kind),
+    aliases: HEADER_ALIASES,
+  });
+}
+
+export interface GridSpec {
+  /** Headers the file must carry, or the whole parse is refused. */
+  required: string[];
+  /** Every header this kind understands — quoted back in the error. */
+  expected: string[];
+  /** Normalized-header → canonical-header, so "flat no" reaches "Flat Number". */
+  aliases?: Record<string, string>;
+}
+
+/**
+ * Read a pasted CSV or an uploaded workbook into plain header→value rows.
+ *
+ * Split out from `parseRows` so `bulk-expense.service` can reuse the reading,
+ * header-normalising and blank-row handling without being forced to become an
+ * `ImportKind` — it does not create entities and does not belong in that enum.
+ */
+export function parseGrid(source: ImportSource, spec: GridSpec): Record<string, string>[] {
   const text = source.csvText?.trim();
   if (!text && !source.fileBuffer?.length) {
     throw new ImportError('Paste your spreadsheet as CSV, or choose a file to upload.');
@@ -182,18 +206,17 @@ export function parseRows(kind: ImportKind, source: ImportSource): Record<string
   if (!grid.length) throw new ImportError('That file is empty — there is nothing to import.');
 
   const rawHeaders = (grid[0] || []).map(h => String(h ?? '').trim());
+  const aliases = spec.aliases || {};
   const mapped = rawHeaders.map(h => {
     const n = normalizeHeader(h);
-    return HEADER_ALIASES[n] || h;
+    return aliases[n] || h;
   });
 
-  const missing = COLUMNS[kind]
-    .filter(c => c.required && !mapped.includes(c.header))
-    .map(c => c.header);
+  const missing = spec.required.filter(h => !mapped.includes(h));
   if (missing.length) {
     throw new ImportError(
       `Your file is missing the ${missing.length > 1 ? 'columns' : 'column'} ${missing.map(m => `"${m}"`).join(', ')}. ` +
-      `Expected: ${columnsFor(kind).join(', ')}. Download the template to see the exact format.`,
+      `Expected: ${spec.expected.join(', ')}. Download the template to see the exact format.`,
     );
   }
 
@@ -774,12 +797,72 @@ async function commitDues(
 // ----------------------------------------------------------------- template
 
 /**
- * A blank workbook with the right headers and one worked example.
+ * Attach a real Excel dropdown to a whole column.
+ *
+ * The single biggest source of failed rows is a typed value that does not match
+ * anything — "A-Wing" for "A Wing", "Rented" for "RENTED", a flat size that was
+ * renamed last month. A dropdown removes the guess entirely: the treasurer
+ * picks from this society's own list instead of trying to remember it.
+ *
+ * The options live on a hidden sheet and are referenced by range rather than
+ * inlined. Excel caps an inline list at 255 characters, which a society with
+ * eight wings and a dozen flat sizes blows straight past — and it fails by
+ * silently dropping the dropdown, not by complaining.
+ */
+export function attachDropdown(
+  wb: ExcelJS.Workbook,
+  ws: ExcelJS.Worksheet,
+  headers: string[],
+  header: string,
+  values: string[],
+  lastRow = 500,
+) {
+  if (!values.length) return;
+  const colIndex = headers.indexOf(header) + 1;
+  if (colIndex <= 0) return;
+
+  let lists = wb.getWorksheet('_lists');
+  if (!lists) {
+    lists = wb.addWorksheet('_lists');
+    // Very hidden, not merely hidden: a plain hidden sheet is one right-click
+    // away from being unhidden, edited, and quietly breaking every dropdown.
+    lists.state = 'veryHidden';
+  }
+
+  const listCol = lists.columnCount + 1;
+  lists.getCell(1, listCol).value = header;
+  values.forEach((v, i) => { lists!.getCell(i + 2, listCol).value = v; });
+
+  const letter = lists.getColumn(listCol).letter;
+  const ref = `_lists!$${letter}$2:$${letter}$${values.length + 1}`;
+
+  for (let r = 2; r <= lastRow; r++) {
+    ws.getCell(r, colIndex).dataValidation = {
+      type: 'list',
+      allowBlank: true,
+      formulae: [ref],
+      showErrorMessage: true,
+      errorStyle: 'warning',
+      errorTitle: 'Not one of your options',
+      error: `Pick a ${header.toLowerCase()} from the list. Typing something else will fail on import.`,
+    };
+  }
+}
+
+/** The society's own values, for the dropdowns. Empty lists simply mean no dropdown. */
+export interface TemplateChoices {
+  blocks?: string[];
+  flatSizes?: string[];
+}
+
+/**
+ * A blank workbook with the right headers, one worked example, and dropdowns
+ * wherever the answer comes from a fixed list.
  *
  * The example row is the documentation — nobody reads a column spec, but
  * everybody copies the row above theirs.
  */
-export async function templateFor(kind: ImportKind): Promise<Buffer> {
+export async function templateFor(kind: ImportKind, choices: TemplateChoices = {}): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'ResiSmart';
   const ws = wb.addWorksheet(kind === 'OPENING_DUES' ? 'Opening Dues' : kind === 'MEMBERS' ? 'Members & Shares' : 'Flats');
@@ -802,9 +885,19 @@ export async function templateFor(kind: ImportKind): Promise<Buffer> {
     col.width = Math.min(max, i === 0 ? 24 : 20);
   });
 
+  // Pick, don't type. Status comes from the enum; wings and sizes come from
+  // this society's own records, so the list is always current.
+  attachDropdown(wb, ws, headers, 'Block', choices.blocks || []);
+  if (kind === 'FLATS') {
+    attachDropdown(wb, ws, headers, 'Status', Object.values(FlatStatus));
+    attachDropdown(wb, ws, headers, 'Size', choices.flatSizes || []);
+  }
+
   // Written as a note rather than an extra row: a stray row would be parsed back
   // as data and reported as a broken row by our own validator.
-  ws.getCell('A1').note = 'Replace the grey example row with your own data. Do not rename these headers.';
+  ws.getCell('A1').note =
+    'Replace the grey example row with your own data. Do not rename these headers. ' +
+    'Shaded columns have a dropdown — click the cell and pick from the list.';
 
   // Copied into a real Buffer: exceljs hands back its own Buffer-ish type, and
   // callers (multer's parser, res.send) want the genuine article.

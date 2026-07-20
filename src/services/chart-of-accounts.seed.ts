@@ -1,5 +1,6 @@
 import mongoose, { ClientSession } from 'mongoose';
 import { LedgerAccount, AccountType, SubLedgerDimension, NormalBalance, normalBalanceForType } from '../models/ledger-account.model';
+import { logger } from '../utils/logger.util';
 
 interface DefaultAccount {
   code: string;
@@ -89,14 +90,44 @@ export const DEFAULT_ACCOUNTS: DefaultAccount[] = [
   { code: '5180', name: 'Bank / Gateway Charges', type: 'EXPENSE' },
   { code: '5190', name: 'Depreciation', type: 'EXPENSE' },
   { code: '5195', name: 'Loss on Sale of Assets', type: 'EXPENSE' },
+  // Distinct from 5100/5110 on purpose: those are what an AGENCY charges for
+  // supplying guards or cleaners. This is what the society pays a person it
+  // employs directly — a different relationship and a different line in the
+  // Income & Expenditure.
+  { code: '5200', name: 'Staff Payments', type: 'EXPENSE' },
   { code: '5900', name: 'Rebates & Waivers', type: 'EXPENSE' },
 ];
+
 
 /** Headings used to group accounts into Balance Sheet schedules. */
 export const ACCOUNT_GROUPS: { code: string; name: string; type: AccountType }[] = [
   { code: '1000', name: 'Cash & Bank Balances', type: 'ASSET' },
   { code: '1500', name: 'Fixed Assets', type: 'ASSET' },
 ];
+
+/**
+ * No two accounts, and no account and group, may claim the same code.
+ *
+ * This is not hypothetical, and it is why this check exists at all. `1500 Fixed
+ * Assets` was added as a GROUP while an ACCOUNT already held that code;
+ * `$setOnInsert` matched the existing row, quietly did nothing, and the account
+ * was simply never created. Nobody noticed for months — a missing account looks
+ * exactly like an unused one.
+ *
+ * Runs at import time, so a bad edit fails the process on boot rather than
+ * silently in one society's ledger.
+ */
+(function assertNoCodeCollisions() {
+  const seen = new Map<string, string>();
+  const claim = (code: string, what: string) => {
+    if (seen.has(code)) {
+      throw new Error(`Chart of accounts: code ${code} is claimed twice — "${seen.get(code)}" and "${what}"`);
+    }
+    seen.set(code, what);
+  };
+  for (const a of DEFAULT_ACCOUNTS) claim(a.code, `account ${a.name}`);
+  for (const g of ACCOUNT_GROUPS) claim(g.code, `group ${g.name}`);
+})();
 
 /** Codes referenced by name elsewhere (posting map), so they stay stable. */
 export const ACCOUNT_CODES = {
@@ -181,6 +212,34 @@ export async function seedChartOfAccounts(
   }));
 
   const res = await LedgerAccount.bulkWrite(ops as any, { session });
+
+  // A society may already hold one of these codes for something of its own —
+  // a custom "5200 Garden Maintenance" created before Staff Payments was
+  // seeded. `$setOnInsert` then matches that row and silently does nothing, so
+  // the seeded account simply never appears and nobody is told.
+  //
+  // This is the `1500` bug from the other direction: there, a seeded group took
+  // a seeded account's code; here, the society's own data takes it. The
+  // import-time assertion below cannot see this one — only the database can.
+  //
+  // Left as a warning rather than an error on purpose. The society's meaning
+  // wins, nothing is corrupted, and no code path depends on these codes by
+  // number — every screen lists the society's own heads. But it must be
+  // visible, because an account that quietly does not exist looks exactly like
+  // one nobody uses.
+  const seededCodes = DEFAULT_ACCOUNTS.map(a => a.code);
+  const existing = await LedgerAccount.find({ societyId, code: { $in: seededCodes } })
+    .select('code name').session(session ?? null).lean();
+  const wantedName = new Map(DEFAULT_ACCOUNTS.map(a => [a.code, a.name]));
+  for (const row of existing) {
+    const want = wantedName.get(row.code);
+    if (want && row.name !== want) {
+      logger.warn(
+        `Society ${societyId}: account ${row.code} is "${row.name}", not the standard "${want}". ` +
+        `The standard account was not created — this society's own meaning stands.`,
+      );
+    }
+  }
 
   // Backfill for societies seeded before grouping and mutuality existed. The
   // upserts above use $setOnInsert, so they never touch an account that is

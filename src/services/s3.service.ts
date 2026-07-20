@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { appConfig } from '../config/appConfig';
 import crypto from 'crypto';
@@ -66,6 +66,24 @@ class S3Service {
    * Generates a short-lived presigned GET URL for a private object so a logged-in
    * user can download it without the object being publicly readable.
    */
+  /**
+   * Delete one object.
+   *
+   * Added for the visitor-photo retention purge: under the DPDP Act personal
+   * data has to actually go once its purpose is served, and deleting the
+   * database row while leaving the face on S3 would be the worst of both
+   * worlds — no record of the visit, and the photograph kept forever.
+   *
+   * S3 treats deleting a missing key as success, which is the behaviour we
+   * want: the desired end state is "not there".
+   */
+  async deleteObject(key: string): Promise<void> {
+    await this.s3Client.send(new DeleteObjectCommand({
+      Bucket: appConfig.awsS3Bucket,
+      Key: key,
+    }));
+  }
+
   async getSignedDownloadUrl(key: string, opts?: { expiresIn?: number; downloadName?: string }): Promise<string> {
     const command = new GetObjectCommand({
       Bucket: appConfig.awsS3Bucket,

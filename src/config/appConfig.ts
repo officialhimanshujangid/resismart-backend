@@ -62,6 +62,27 @@ export const appConfig = {
   razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
   razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   razorpayBypassPennyDrop: process.env.RAZORPAY_BYPASS_PENNY_DROP === 'true',
+  /**
+   * Firebase, for notifications to the mobile app.
+   *
+   * All three absent is a supported, silent state — not a warning, not a
+   * degraded mode anybody has to acknowledge. Web push needs no account at all
+   * and carries the feature on its own; FCM simply switches itself on the day
+   * these are filled in. Nothing else in the codebase branches on it.
+   */
+  firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',
+  firebaseClientEmail: process.env.FIREBASE_CLIENT_EMAIL || '',
+  // Stored with literal \n in .env, as Google hands it out. Unescaped at use.
+  firebasePrivateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  /**
+   * Web push (VAPID). Optional here on purpose: when unset, the server
+   * generates a pair once and keeps it in GlobalSetting, so browser push works
+   * out of the box on a fresh install and survives restarts. Set these in the
+   * environment to pin them across a rebuilt database.
+   */
+  vapidPublicKey: process.env.VAPID_PUBLIC_KEY || '',
+  vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || '',
+  vapidSubject: process.env.VAPID_SUBJECT || `mailto:${process.env.SUPPORT_EMAIL || 'support@resismart.com'}`,
 };
 
 /**

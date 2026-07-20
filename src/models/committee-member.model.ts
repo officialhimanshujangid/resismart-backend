@@ -18,6 +18,13 @@ export interface ICommitteeMember extends Document {
   designationKey: string;
   designationLabel: string;
   isOfficeBearer: boolean;
+  /**
+   * What this member can actually see and do. Separate from the designation:
+   * the designation is what the bye-laws call them, this is what the software
+   * lets them touch, and a society may well want two Treasurers with different
+   * access. Unset means the society has not decided — read-only until it does.
+   */
+  accessRoleId?: mongoose.Types.ObjectId;
   appointment: Appointment;
   startDate: Date;
   endDate?: Date | null;
@@ -44,6 +51,7 @@ const CommitteeMemberSchema = new Schema<ICommitteeMember>({
   designationKey: { type: String, required: true, trim: true },
   designationLabel: { type: String, required: true, trim: true },
   isOfficeBearer: { type: Boolean, default: false },
+  accessRoleId: { type: Schema.Types.ObjectId, ref: 'AccessRole' },
   appointment: { type: String, enum: ['ELECTED', 'CO_OPTED', 'APPOINTED'], default: 'ELECTED' },
   startDate: { type: Date, required: true },
   endDate: { type: Date, default: null },

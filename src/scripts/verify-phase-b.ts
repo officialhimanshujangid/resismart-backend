@@ -292,12 +292,15 @@ async function main() {
       try { await fn(); return null; } catch (e: any) { return e; }
     };
 
-    const made = await coa.createAccount(SID, { code: '5200', name: 'Garden Maintenance', type: 'EXPENSE' }, actor);
-    eq('a new expense account is created', made.code, '5200');
+    // Deliberately outside the seeded range. This used to be 5200, which was
+    // free until `5200 Staff Payments` was seeded — and then this test failed
+    // for a reason that had nothing to do with what it is testing.
+    const made = await coa.createAccount(SID, { code: '5700', name: 'Garden Maintenance', type: 'EXPENSE' }, actor);
+    eq('a new expense account is created', made.code, '5700');
     eq('...with the normal balance derived from its type', made.normalBalance, 'DEBIT');
     eq('...and is not a system account', made.isSystem, false);
 
-    const dup = await refuses(() => coa.createAccount(SID, { code: '5200', name: 'Duplicate', type: 'EXPENSE' }, actor));
+    const dup = await refuses(() => coa.createAccount(SID, { code: '5700', name: 'Duplicate', type: 'EXPENSE' }, actor));
     eq('a duplicate code is rejected as a conflict', dup?.status, 409);
 
     const seeded = await LedgerAccount.findOne({ societyId, code: '1100' });
@@ -321,11 +324,11 @@ async function main() {
 
     const renamed = await coa.updateAccount(SID, String(made._id), { name: 'Garden & Landscaping' });
     eq('an account can be renamed', renamed.name, 'Garden & Landscaping');
-    eq('...without its code changing', renamed.code, '5200');
+    eq('...without its code changing', renamed.code, '5700');
 
     const del = await coa.deleteAccount(SID, String(made._id));
     eq('an unused account can be deleted', del.deleted, true);
-    eq('...and is really gone', await LedgerAccount.countDocuments({ societyId, code: '5200' }), 0);
+    eq('...and is really gone', await LedgerAccount.countDocuments({ societyId, code: '5700' }), 0);
   } catch (e: any) {
     fail++;
     console.log(`\n  ERROR  ${e.message}\n${e.stack}`);

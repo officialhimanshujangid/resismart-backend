@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import * as bulkImport from '../services/bulk-import.service';
 import { ImportError, ImportKind, IMPORT_KINDS } from '../services/bulk-import.service';
+import mongoose from 'mongoose';
+import { Block } from '../models/block.model';
+import { FlatSize } from '../models/flat-size.model';
 
 const actorOf = (req: Request) => ({ userId: req.user!.userId, userName: req.user!.userName || 'Admin' });
 
@@ -37,9 +40,19 @@ const sourceOf = (req: Request): bulkImport.ImportSource => ({
 });
 
 /** GET /finance/society/import/:kind/template — a blank workbook to fill in. */
-export const template = handler(async (_societyId, req, res) => {
+export const template = handler(async (societyId, req, res) => {
   const kind = kindOf(req);
-  const buffer = await bulkImport.templateFor(kind);
+  // The dropdowns come from this society's own records, so the list a
+  // treasurer picks from is always the list the import will accept.
+  const sid = new mongoose.Types.ObjectId(societyId);
+  const [blocks, sizes] = await Promise.all([
+    Block.find({ societyId: sid }).select('name').sort({ name: 1 }).lean(),
+    FlatSize.find({ societyId: sid }).select('name').sort({ name: 1 }).lean(),
+  ]);
+  const buffer = await bulkImport.templateFor(kind, {
+    blocks: blocks.map(b => b.name),
+    flatSizes: sizes.map(s => s.name),
+  });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="resismart-${kind.toLowerCase().replace(/_/g, '-')}-template.xlsx"`);
   res.status(200).send(buffer);

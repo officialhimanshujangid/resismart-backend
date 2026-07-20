@@ -147,6 +147,42 @@ export interface IFinancePolicy extends Document {
   modules?: string[];
 
   /**
+   * Has this society said where its books start?
+   *
+   * Not the same question as the period lock below. This one is asked once, at
+   * the beginning: what did you already own, owe and hold on the day you began?
+   * A society that never answers it can still produce a Balance Sheet — it will
+   * simply be wrong, quietly, from the first day.
+   *
+   * The answer is allowed to be "nothing". A brand new society genuinely has no
+   * opening balances, and `declaredEmpty` records that it was asked and said so,
+   * which is a different and much more defensible thing than never asking.
+   *
+   * `completedAt` unset means unanswered — but see `finance-setup.service`,
+   * which infers an answer for a society that was already trading before this
+   * existed rather than locking it out of its own books.
+   */
+  setup?: {
+    completedAt?: Date;
+    completedBy?: mongoose.Types.ObjectId;
+    completedByName?: string;
+    /** Sections the society explicitly said it had nothing for. */
+    declaredEmpty?: string[];
+    /** The OPENING voucher this produced, if any balances were actually entered. */
+    openingVoucherId?: mongoose.Types.ObjectId;
+    /** Set when the answer came from existing data, not from a person. */
+    inferredFrom?: Date;
+    /**
+     * Set when an admin deliberately reopened the question.
+     *
+     * Stops `resolveSetup` re-inferring an answer out of the society's own
+     * opening voucher, which would make reopening a no-op that silently allows
+     * a second opening entry to be posted on top of the first.
+     */
+    reopenedAt?: Date;
+  };
+
+  /**
    * Books closed up to and including this date. Once a year is audited and
    * presented at the AGM, a back-dated entry would silently restate figures the
    * members have already been given. Enforced in `postJournal`.
@@ -274,9 +310,29 @@ const FinancePolicySchema = new Schema<IFinancePolicy>({
     withinDays: { type: Number, default: 15, min: 0 },
   },
 
-  // No default: "unset" and "none chosen" must stay distinguishable, or an
-  // existing society would have its screens hidden the day this shipped.
-  modules: { type: [String] },
+  // "Unset" and "none chosen" must stay distinguishable, or an existing society
+  // would have its screens hidden the day this shipped.
+  //
+  // `default: undefined` is load-bearing and easy to lose. Mongoose gives EVERY
+  // array path an automatic default of `[]`, so simply omitting a default here
+  // silently produced `[]` on every fresh policy — which meant a society that
+  // deliberately switched every module off had its choice re-inferred away on
+  // the very next read. The comment above described an intention the schema was
+  // not actually implementing.
+  modules: { type: [String], default: undefined },
+
+  // Same reasoning as `modules`: no defaults anywhere in here. An empty
+  // `declaredEmpty` would read as "asked, nothing to declare" when the truth is
+  // "never asked", and `completedAt` is the only thing that separates them.
+  setup: {
+    completedAt: { type: Date },
+    completedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    completedByName: { type: String },
+    declaredEmpty: { type: [String] },
+    openingVoucherId: { type: Schema.Types.ObjectId, ref: 'JournalEntry' },
+    inferredFrom: { type: Date },
+    reopenedAt: { type: Date },
+  },
 
   lock: {
     lockedUpToDate: { type: Date },

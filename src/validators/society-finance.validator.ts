@@ -489,6 +489,8 @@ export const createExpenseSchema = z.object({
     description: z.string().max(300).optional(),
     amountPaise: z.number().int().min(1),
     fundId: z.string().regex(objectId).optional(),
+    blockId: z.string().regex(objectId).optional(),
+    staffId: z.string().regex(objectId).optional(),
   })).min(1, 'At least one expense line is required'),
 });
 
@@ -670,3 +672,45 @@ export const projectChargeHeadSchema = z.object({
   /** An unsaved form, so the projection can update as the treasurer types. */
   draft: z.any().optional(),
 }).refine(v => v.chargeHeadId || v.draft, { message: 'Pass a charge head id or a draft' });
+
+/**
+ * Opening balances. Amounts are paise and may not be negative — a negative
+ * opening bank balance is an overdraft, which is a liability and belongs on the
+ * other side of the entry, not as a minus sign on an asset.
+ */
+// Capped well below 2^53 so a fat-fingered figure cannot silently lose integer
+// precision when summed — ₹10,000 crore is already far past any society.
+const openingAmount = z.number().int().min(0).max(1e15);
+
+const openingLine = z.object({
+  accountCode: z.string().min(1).max(20),
+  amountPaise: openingAmount,
+});
+
+export const completeSetupSchema = z.object({
+  // A plain `min(8)` string lets "aaaaaaaa" through, which becomes an Invalid
+  // Date — a real Date object, so nothing downstream type-checks it, and it
+  // reaches the financial-year calculation that keys the voucher sequence.
+  entryDate: z.string().refine(v => !Number.isNaN(new Date(v).getTime()), 'Not a date').optional(),
+  bankCash: z.array(openingLine).max(50).optional(),
+  vendorDues: z.array(z.object({
+    vendorId: z.string().regex(objectId),
+    amountPaise: openingAmount,
+  })).max(500).optional(),
+  funds: z.array(openingLine).max(50).optional(),
+  deposits: z.array(openingLine).max(50).optional(),
+  declaredEmpty: z.array(z.enum(['BANK_CASH', 'FLAT_DUES', 'VENDOR_DUES', 'FUNDS', 'DEPOSITS'])).optional(),
+});
+
+/**
+ * Bulk expense entry. Multipart sends every field as text, so booleans and the
+ * enums have to accept their string forms alongside the real thing.
+ */
+export const bulkExpenseSchema = z.object({
+  csvText: z.string().max(2_000_000, 'That paste is too large — upload it as a file instead').optional(),
+  shape: z.enum(['ONE_VOUCHER', 'PER_ROW']).optional(),
+  alreadyPaid: z.union([z.boolean(), z.enum(['true', 'false'])]).optional(),
+  paymentMode: z.enum(['BANK', 'CASH', 'CHEQUE', 'UPI']).optional(),
+  defaultDate: z.string().refine(v => !Number.isNaN(new Date(v).getTime()), 'Not a date').optional(),
+  periodLabel: z.string().max(60).optional(),
+});

@@ -2,6 +2,7 @@ import mongoose, { ClientSession } from 'mongoose';
 import { Expense, IExpense } from '../models/expense.model';
 import { Vendor } from '../models/vendor.model';
 import { Block } from '../models/block.model';
+import { SocietyStaff } from '../models/society-staff.model';
 import { LedgerAccount } from '../models/ledger-account.model';
 import { postJournal, PostLineInput } from './ledger.service';
 import { nextDocNumber } from './finance-sequence.service';
@@ -172,6 +173,15 @@ export async function createExpense(societyId: string, body: any, actor: Actor):
   const blockById = new Map(blocks.map(b => [String(b._id), b.name]));
   for (const id of blockIds) if (!blockById.has(id)) throw new Error('Block not found');
 
+  // Same treatment for staff: checked against this society, and the name
+  // snapshotted so a voucher still reads correctly years after somebody left.
+  const staffIds = [...new Set(lines.map((l: any) => l.staffId).filter((s: any) => !!s))].map(String);
+  const staffRows = staffIds.length
+    ? await SocietyStaff.find({ _id: { $in: staffIds }, societyId }).select('person.name').lean()
+    : [];
+  const staffById = new Map(staffRows.map(s => [String(s._id), s.person.name]));
+  for (const id of staffIds) if (!staffById.has(id)) throw new Error('Staff member not found');
+
   const { number } = await nextDocNumber(societyId, 'PAYMENT', fyString, { prefix: policy.numbering.voucher.prefix, padding: policy.numbering.voucher.padding, template: policy.numbering.voucher.template });
 
   return Expense.create({
@@ -182,6 +192,8 @@ export async function createExpense(societyId: string, body: any, actor: Actor):
       expenseAccountName: nameByCode.get(l.expenseAccountCode),
       blockId: l.blockId || undefined,
       blockName: l.blockId ? blockById.get(String(l.blockId)) : undefined,
+      staffId: l.staffId || undefined,
+      staffName: l.staffId ? staffById.get(String(l.staffId)) : undefined,
     })),
     grossPaise, tdsPaise, netPayablePaise,
     paymentMode: body.paymentMode,

@@ -13,6 +13,13 @@ import { logger } from '../utils/logger.util';
 import { SocietyFinanceSettings } from '../models/society-finance-settings.model';
 import { SocietyFinanceService } from './society-finance.service';
 import { FinancePolicy } from '../models/finance-policy.model';
+import { SocietyOpsPolicy } from '../models/society-ops-policy.model';
+import { autoCloseStragglers, reconcileDay, purgeOldEntries } from './visitor.service';
+import { purgeOld as purgeOldNotifications } from './notification.service';
+import { pruneStaleTokens } from './push.service';
+import { sweepExpired as sweepExpiredApprovals } from './gate-approval.service';
+import { expireOld as expireOldPasses } from './gate-pass.service';
+import { expireOld as expireOldTransfers } from './admin-transfer.service';
 import { generateInvoicesForSociety } from './invoicing.service';
 import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
 import FinanceNotificationService from './finance-notification.service';
@@ -262,7 +269,103 @@ export function startCronJobs(): void {
     }
   });
 
-  logger.info('[cron] Scheduled daily subscription jobs (09:00), listing expiry (09:05), hourly boost expiry, and finance jobs');
+  // ------------------------------------------------------------------- gate
+  //
+  // Runs hourly rather than nightly because each society closes off at its own
+  // hour, and a single fixed time would be the middle of the evening for half
+  // of them. The job only acts on societies whose chosen hour has just passed.
+  cron.schedule('10 * * * *', async () => {
+    const hour = new Date().getHours();
+    try {
+      const policies = await SocietyOpsPolicy.find({
+        'gate.exit.trackExit': true,
+        'gate.exit.autoCloseAtHour': hour,
+      }).select('societyId').lean();
+
+      for (const p of policies) {
+        const societyId = String(p.societyId);
+        try {
+          const closed = await autoCloseStragglers(societyId);
+          if (closed > 0) {
+            // The morning number the committee can actually act on. Exit
+            // tracking has no forcing function, so the only honest fix is to
+            // make the gap visible and let management close it.
+            const day = await reconcileDay(societyId);
+            logger.info(
+              `[cron] Society ${societyId}: ${day.entries} entries, ${day.exitsRecorded} exits recorded ` +
+              `(${day.accuracy}%), ${day.estimated} closed off automatically`,
+            );
+          }
+        } catch (err: any) {
+          logger.error(`[cron] Gate close-off failed for society ${societyId}: ${err.message}`);
+        }
+      }
+    } catch (err: any) {
+      logger.error(`[cron] Gate close-off sweep failed: ${err.message}`);
+    }
+  });
+
+  // Retention purge. Under the DPDP Act personal data has to go once its
+  // purpose is served, and a visitor's photograph is personal data.
+  cron.schedule('40 3 * * *', async () => {
+    try {
+      const policies = await SocietyOpsPolicy.find({}).select('societyId').lean();
+      for (const p of policies) {
+        try { await purgeOldEntries(String(p.societyId)); }
+        catch (err: any) { logger.error(`[cron] Gate purge failed for society ${p.societyId}: ${err.message}`); }
+      }
+    } catch (err: any) {
+      logger.error(`[cron] Gate purge sweep failed: ${err.message}`);
+    }
+  });
+
+  /**
+   * Approval timeouts, every minute.
+   *
+   * A minute rather than an hour because the unit here is a person standing at
+   * a gate: a request that says "60 seconds" and resolves at the top of the
+   * next hour is worse than not having a timeout at all. One indexed query per
+   * minute over PENDING rows, which is nothing.
+   */
+  cron.schedule('* * * * *', async () => {
+    try {
+      const { resolved } = await sweepExpiredApprovals();
+      if (resolved) logger.info(`[cron] ${resolved} gate approvals timed out`);
+    } catch (err: any) {
+      logger.error(`[cron] Approval sweep failed: ${err.message}`);
+    }
+  });
+
+  // Notification housekeeping, in the same quiet hour.
+  //
+  // Two different jobs sharing one slot: old notifications go because they are
+  // a nudge and not a record (the complaint and the entry are kept elsewhere),
+  // and long-dead devices go because writing to a phone that was uninstalled
+  // last spring costs a request every single time somebody is told anything.
+  cron.schedule('50 3 * * *', async () => {
+    try {
+      const policies = await SocietyOpsPolicy.find({}).select('societyId').lean();
+      for (const p of policies) {
+        try { await purgeOldNotifications(String(p.societyId)); }
+        catch (err: any) { logger.error(`[cron] Notification purge failed for society ${p.societyId}: ${err.message}`); }
+      }
+      const retired = await pruneStaleTokens();
+      if (retired) logger.info(`[cron] Retired ${retired} dead push devices`);
+      // Not cosmetic: an ACTIVE pass holds its six-digit code against the
+      // partial unique index, so leaving spent ones active slowly makes codes
+      // harder to allocate.
+      const expired = await expireOldPasses();
+      if (expired) logger.info(`[cron] Expired ${expired} gate passes`);
+      // An admin handover nobody answered must not sit INITIATED forever — it
+      // holds the society's one live-transfer slot and blocks a second attempt.
+      const lapsed = await expireOldTransfers();
+      if (lapsed) logger.info(`[cron] Expired ${lapsed} admin handover invitations`);
+    } catch (err: any) {
+      logger.error(`[cron] Notification housekeeping failed: ${err.message}`);
+    }
+  });
+
+  logger.info('[cron] Scheduled daily subscription jobs (09:00), listing expiry (09:05), hourly boost expiry, finance jobs, and gate close-off/purge');
 }
 
 /** Email due/overdue reminders for a society's outstanding invoices (deduped per offset per day). */

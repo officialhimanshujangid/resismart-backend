@@ -14,6 +14,17 @@ export interface IExpenseLine {
    */
   blockId?: mongoose.Types.ObjectId;
   blockName?: string;
+  /**
+   * Which staff member this line paid.
+   *
+   * The third optional dimension, alongside fund and wing — deliberately held
+   * back until the staff model existed, because a field pointing at nothing is
+   * the exact declared-but-never-read shape that has bitten this module a dozen
+   * times. Answers "how much did we pay Gangaram this year" straight from the
+   * expense lines, so the figure is the ledger's own and cannot drift from it.
+   */
+  staffId?: mongoose.Types.ObjectId;
+  staffName?: string;
 }
 
 export interface IExpense extends Document {
@@ -59,6 +70,8 @@ const ExpenseLineSchema = new Schema<IExpenseLine>({
   fundId: { type: Schema.Types.ObjectId, ref: 'FinanceFund' },
   blockId: { type: Schema.Types.ObjectId, ref: 'Block' },
   blockName: { type: String, trim: true },
+  staffId: { type: Schema.Types.ObjectId, ref: 'SocietyStaff' },
+  staffName: { type: String, trim: true },
 }, { _id: false });
 
 const ExpenseSchema = new Schema<IExpense>({

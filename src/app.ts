@@ -24,6 +24,12 @@ import meRoutes from './routes/me.routes';
 import marketplaceRoutes from './routes/marketplace.routes';
 import publicMarketplaceRoutes from './routes/public-marketplace.routes';
 import committeeRoutes from './routes/committee.routes';
+import accessRoleRoutes from './routes/access-role.routes';
+import visitorRoutes from './routes/visitor.routes';
+import staffRoutes from './routes/staff.routes';
+import complaintRoutes from './routes/complaint.routes';
+import notificationRoutes from './routes/notification.routes';
+import adminTransferRoutes from './routes/admin-transfer.routes';
 import societyFinanceRoutes from './routes/society-finance.routes';
 import residentFinanceRoutes from './routes/resident-finance.routes';
 import { errorHandler } from './middlewares/error.middleware';
@@ -52,7 +58,13 @@ app.use(cors({
 }));
 
 // 3. Compress Response Payloads for Optimization
-app.use(compression());
+//
+// Except the notification stream. Compression buffers, and a server-sent event
+// stream that is buffered delivers nothing until the buffer happens to fill —
+// which looks exactly like a feature that does not work, intermittently.
+app.use(compression({
+  filter: (req, res) => req.path.endsWith('/notifications/stream') ? false : compression.filter(req, res),
+}));
 
 // 4. Rate Limiting — general API limiter + stricter auth limiter
 const generalLimiter = rateLimit({
@@ -118,6 +130,12 @@ app.use('/api/v1/me', meRoutes);
 app.use('/api/v1/marketplace', marketplaceRoutes);
 app.use('/api/v1/public/marketplace', publicMarketplaceRoutes);
 app.use('/api/v1/committee', committeeRoutes);
+app.use('/api/v1/access-roles', accessRoleRoutes);
+app.use('/api/v1/gate', visitorRoutes);
+app.use('/api/v1/staff', staffRoutes);
+app.use('/api/v1/complaints', complaintRoutes);
+app.use('/api/v1/notifications', notificationRoutes);
+app.use('/api/v1/admin-transfer', adminTransferRoutes);
 app.use('/api/v1/finance/society', societyFinanceRoutes);
 app.use('/api/v1/finance/resident', residentFinanceRoutes);
 // 10. JSON 404 for unknown routes

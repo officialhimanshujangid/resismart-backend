@@ -95,6 +95,11 @@ JournalEntrySchema.index({ sourceType: 1, sourceId: 1 });
 // and every expense line carries a vendorId, but nothing could query it without
 // unwinding the whole journal.
 JournalEntrySchema.index({ societyId: 1, 'lines.vendorId': 1, entryDate: -1 });
+// Both serve the finance-setup gate. "Has this voucher been reversed?" and
+// "has anything been posted since setup was confirmed?" were otherwise full
+// collection scans, on a path that runs before every finance write.
+JournalEntrySchema.index({ societyId: 1, reversalOfId: 1 });
+JournalEntrySchema.index({ societyId: 1, createdAt: -1 });
 
 export const JournalEntry = mongoose.model<IJournalEntry>('JournalEntry', JournalEntrySchema);
 export default JournalEntry;

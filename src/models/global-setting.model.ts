@@ -5,6 +5,25 @@ export interface IGlobalSetting extends Document {
   defaultTrialCapabilities: Map<string, any>; // the perpetual FREE-TIER limits (used when no valid paid plan)
   expiryReminderDays: number[]; // e.g. [3,2,1] => remind 3, 2 and 1 days before expiry
   razorpayWebhookSecret?: string;
+  /**
+   * Web-push signing keys, generated once on first use when the environment
+   * does not pin them. They live here rather than in memory because a
+   * regenerated pair invalidates every browser subscription ever handed out —
+   * a restart would silently stop notifications for everyone, and nothing
+   * would look broken.
+   */
+  vapidPublicKey?: string;
+  vapidPrivateKey?: string;
+  /**
+   * Ed25519, for signing gate passes. Same generate-once-and-keep reasoning as
+   * VAPID above, with a sharper consequence: regenerating would invalidate
+   * every pass already sitting in somebody's WhatsApp.
+   *
+   * PEM-encoded. The PUBLIC half is handed to guard devices so they can verify
+   * a QR with no network; the private half never leaves the server.
+   */
+  passSigningPublicKey?: string;
+  passSigningPrivateKey?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,6 +52,18 @@ const GlobalSettingSchema = new Schema({
     default: [3, 1],
   },
   razorpayWebhookSecret: {
+    type: String,
+  },
+  vapidPublicKey: {
+    type: String,
+  },
+  vapidPrivateKey: {
+    type: String,
+  },
+  passSigningPublicKey: {
+    type: String,
+  },
+  passSigningPrivateKey: {
     type: String,
   }
 }, {

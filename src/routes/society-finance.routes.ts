@@ -21,6 +21,9 @@ import * as pdcController from '../controllers/pdc.controller';
 import * as adjustmentsController from '../controllers/adjustments.controller';
 import * as bankReconciliationController from '../controllers/bank-reconciliation.controller';
 import * as bulkImportController from '../controllers/bulk-import.controller';
+import * as financeSetupController from '../controllers/finance-setup.controller';
+import * as bulkExpenseController from '../controllers/bulk-expense.controller';
+import { requireSetupComplete } from '../middlewares/finance-setup.middleware';
 import { uploadSpreadsheet } from '../middlewares/upload.middleware';
 import {
   updateFinanceSettingsSchema,
@@ -68,6 +71,8 @@ import {
   requestRefundSchema,
   bulkImportSchema,
   upsertBudgetSchema,
+  completeSetupSchema,
+  bulkExpenseSchema,
 } from '../validators/society-finance.validator';
 
 const router = Router();
@@ -76,9 +81,20 @@ const router = Router();
 router.use(authenticateJWT);
 router.use(enforceTenantAccess);
 
+// Nothing may be recorded until the society has said where its books start.
+// Mounted here rather than per-route so a route added later is gated by
+// default — see the middleware for what stays open and why.
+router.use(requireSetupComplete);
+
 // Society Admin & Committee Roles
 const ADMIN_ROLES = [UserRole.SOCIETY_ADMIN];
 const ADMIN_AND_COMMITTEE = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE];
+
+// Opening position — the one question that has to be answered before any of
+// the rest of this file will accept a write.
+router.get('/setup', authorizeRoles(ADMIN_AND_COMMITTEE), financeSetupController.getSetup);
+router.post('/setup/complete', authorizeRoles(ADMIN_ROLES), validate(completeSetupSchema), financeSetupController.completeSetup);
+router.post('/setup/reopen', authorizeRoles(ADMIN_ROLES), financeSetupController.reopenSetup);
 
 // Settings
 router.get('/settings', authorizeRoles(ADMIN_ROLES), societyFinanceController.getSettings);
@@ -143,6 +159,13 @@ router.post('/pdc/:id/status', authorizeRoles(ADMIN_ROLES), validate(pdcStatusSc
 // Every write goes through `preview` first: the treasurer sees each row's
 // verdict before anything is committed. `uploadExcel` is a no-op unless the
 // request is multipart, so the same route takes a pasted CSV or a file.
+// Bulk expense entry. Separate from /import because it moves money rather than
+// creating entities — see the service for why that distinction matters.
+router.get('/expenses/bulk/template', authorizeRoles(ADMIN_ROLES), bulkExpenseController.template);
+router.post('/expenses/bulk/preview', authorizeRoles(ADMIN_AND_COMMITTEE), uploadSpreadsheet.single('file'), validate(bulkExpenseSchema), bulkExpenseController.preview);
+router.post('/expenses/bulk/commit', authorizeRoles(ADMIN_ROLES), uploadSpreadsheet.single('file'), validate(bulkExpenseSchema), bulkExpenseController.commit);
+router.get('/expenses/:id/repeat', authorizeRoles(ADMIN_AND_COMMITTEE), bulkExpenseController.repeat);
+
 router.get('/import/:kind/template', authorizeRoles(ADMIN_ROLES), bulkImportController.template);
 router.post('/import/:kind/preview', authorizeRoles(ADMIN_ROLES), uploadSpreadsheet.single('file'), validate(bulkImportSchema), bulkImportController.preview);
 router.post('/import/:kind/commit', authorizeRoles(ADMIN_ROLES), uploadSpreadsheet.single('file'), validate(bulkImportSchema), bulkImportController.commit);

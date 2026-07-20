@@ -17,6 +17,8 @@ import { JournalEntry } from '../models/journal-entry.model';
 import { ShareCertificate } from '../models/share-certificate.model';
 import { FixedAsset } from '../models/fixed-asset.model';
 import { SequenceCounter } from '../models/sequence-counter.model';
+import { OPS_MODULES } from '../models/society-ops-policy.model';
+import { DEFAULT_MODULES as DEFAULT_OPS_MODULES } from '../services/ops-policy.service';
 import { Flat, FlatStatus } from '../models/flat.model';
 import { seedChartOfAccounts } from '../services/chart-of-accounts.seed';
 import { getOrCreatePolicy } from '../services/finance-policy.service';
@@ -50,6 +52,37 @@ function getSidebarFinanceModules(): { tagged: string[]; untagged: string[] } {
     if (mod) tagged.push(mod); else untagged.push(label);
   }
   return { tagged, untagged };
+}
+
+/**
+ * The same scrape, for the OPERATIONS side of the menu.
+ *
+ * Written after a real fault: Staff, Complaints and Equipment were all built,
+ * verified and shipped, and an admin signing in could not find any of them —
+ * their modules were off by default and the sidebar filtered them away. The
+ * finance half of this file had an equivalent assertion; the ops half did not,
+ * so nothing noticed.
+ */
+function getSidebarOpsModules(): { tagged: string[]; ungated: string[] } {
+  const file = path.resolve(__dirname, '../../../frontend/src/components/layout/sidebarContent.tsx');
+  const src = fs.readFileSync(file, 'utf8');
+  // Scanned across the WHOLE file rather than line by line: the finance
+  // entries happen to be one-liners, but Complaints, Staff and Equipment are
+  // multi-line objects with `label` and `opsModule` several lines apart. A
+  // per-line scraper silently sees none of them — and an assertion that
+  // silently checks nothing is worse than no assertion, because it reads as
+  // coverage.
+  const tagged = [...src.matchAll(/opsModule:\s*'([^']+)'/g)].map(m => m[1]);
+
+  // Ungated: an ops screen whose own line carries no opsModule. Only used for
+  // the settings door, which is deliberately a one-liner so this stays simple.
+  const ungated: string[] = [];
+  for (const line of src.split('\n')) {
+    const label = /label:\s*'([^']+)'/.exec(line)?.[1];
+    if (!label || /opsModule:/.test(line)) continue;
+    if (/href:\s*'\/dashboard\/(gate|staff|complaints|assets)/.test(line)) ungated.push(label);
+  }
+  return { tagged, ungated };
 }
 
 const userId = new mongoose.Types.ObjectId();
@@ -180,6 +213,35 @@ async function main() {
     ok('every optional module has at least one screen behind it',
       FINANCE_MODULES.every(m => nav.tagged.includes(m)),
       `unused: ${FINANCE_MODULES.filter(m => !nav.tagged.includes(m)).join(', ')}`);
+
+    // ------------------------------------------------- the operations menu
+    console.log('\nThe operations menu');
+    const opsNav = getSidebarOpsModules();
+    ok('every ops nav tag names a real module',
+      opsNav.tagged.every(k => (OPS_MODULES as readonly string[]).includes(k)),
+      JSON.stringify(opsNav.tagged.filter(k => !(OPS_MODULES as readonly string[]).includes(k))));
+
+    /**
+     * The one that would have caught it. Every module must have a screen, or
+     * the toggle switches nothing; and every module must be ON for a fresh
+     * society, or the screen exists and nobody can find it.
+     */
+    for (const m of OPS_MODULES) {
+      ok(`"${m}" has at least one screen behind it`, opsNav.tagged.includes(m),
+        JSON.stringify(opsNav.tagged));
+      ok(`...and a new society gets it`, (DEFAULT_OPS_MODULES as readonly string[]).includes(m),
+        JSON.stringify(DEFAULT_OPS_MODULES));
+    }
+
+    /**
+     * And the door back in.
+     *
+     * The settings screen is where modules are switched on and off. If it were
+     * itself behind a module, an admin could switch that module off and lose
+     * the only way to switch it back on. So it must be ungated, forever.
+     */
+    ok('Operations Settings is never behind a module',
+      opsNav.ungated.includes('Operations Settings'), JSON.stringify(opsNav.ungated));
   } catch (e: any) {
     fail++;
     console.log(`\n  ERROR  ${e.message}\n${e.stack}`);
