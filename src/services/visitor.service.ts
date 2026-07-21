@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
-import { VisitorEntry, IVisitorEntry } from '../models/visitor-entry.model';
-import { SocietyOpsPolicy } from '../models/society-ops-policy.model';
+import { VisitorEntry, IVisitorEntry, EntryStatus, AdmittedVia } from '../models/visitor-entry.model';
+import { SocietyOpsPolicy, RESIDENT_MOVEMENT } from '../models/society-ops-policy.model';
 import { Flat } from '../models/flat.model';
 import { getOrCreateOpsPolicy, approvalRuleFor, expectedStayFor } from './ops-policy.service';
 import { EffectiveAccess, allowsBlock } from './access-role.service';
@@ -8,6 +8,7 @@ import s3Service from './s3.service';
 import { notify } from './notification.service';
 import { usersOfFlat } from './notify-recipients';
 import { checkBlocked } from './gate-depth.service';
+import { assertGateFor, defaultGate } from './gate-crud.service';
 import { logger } from '../utils/logger.util';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
@@ -64,6 +65,10 @@ export interface RecordEntryInput {
   vehicleNumber?: string;
   vehiclePhotoKey?: string;
   notes?: string;
+  /** The staff member on the gate — closes the dead `guardStaffId` link. */
+  guardStaffId?: string;
+  /** The physical gate they came in by. */
+  entryGateId?: string;
 }
 
 /**
@@ -77,18 +82,81 @@ export interface RecordEntryInput {
 export async function recordEntry(
   societyId: string, input: RecordEntryInput, actor: Actor,
 ): Promise<IVisitorEntry> {
+  // Thin wrapper kept for the tests and any caller that just wants a plain
+  // admit-now entry. The real decision — ask, notify, or let straight in —
+  // lives in arrival.service, which calls createEntry below.
+  return createEntry(societyId, input, actor, { status: 'INSIDE', admittedVia: 'GUARD', notifyArrival: true });
+}
+
+export interface CreateEntryOptions {
+  status: EntryStatus;
+  admittedVia?: AdmittedVia;
+  approvalRequestId?: string;
+  gatePassId?: string;
+  decidedByName?: string;
+  decisionReason?: string;
+  /** Send the flat a "somebody arrived" notice. Off for AWAITING — the approval already notified. */
+  notifyArrival?: boolean;
+}
+
+/**
+ * Write one visitor entry, in whatever state the caller decided.
+ *
+ * This is the single place a `VisitorEntry` is born. Everything that used to
+ * be three unconnected paths — the guard's log, an approved visitor, a
+ * redeemed pass — now goes through here with a different `status` and
+ * `admittedVia`, so the register can never again disagree with itself about
+ * who is inside.
+ */
+export async function createEntry(
+  societyId: string, input: RecordEntryInput, actor: Actor, opts: CreateEntryOptions,
+): Promise<IVisitorEntry> {
   const policy = await getOrCreateOpsPolicy(societyId, actor.userId, actor.userName);
 
-  if (!policy.gate.capture.categoriesEnabled.includes(input.category)) {
+  /**
+   * A resident's own coming and going.
+   *
+   * This is the one category the software refuses by default, and the refusal
+   * is the feature. `gate.residents.logMovement` has existed since the module
+   * was written — stored, validated and drawn as a switch — while nothing
+   * anywhere read it, so a society that left it OFF was recording residents
+   * exactly as if it were ON, and a society that turned it on gained nothing.
+   *
+   * Now the switch is the gate itself: with it off there is no way to write a
+   * resident movement at all, which is a stronger guarantee than a policy
+   * everybody promises to follow. `logVehicleOnly` narrows it further to the
+   * plate — the society learns a car came in, not who was in it.
+   */
+  if (input.category === RESIDENT_MOVEMENT) {
+    if (!policy.gate.residents.logMovement) {
+      throw new VisitorError(
+        'This society does not record residents coming and going. A committee can switch it on in gate settings.',
+        403,
+      );
+    }
+    if (policy.gate.residents.logVehicleOnly && !input.vehicleNumber?.trim()) {
+      throw new VisitorError('Only resident vehicles are recorded here — a registration number is needed.');
+    }
+  } else if (!policy.gate.capture.categoriesEnabled.includes(input.category)) {
     throw new VisitorError(`This society does not record "${input.category}" visitors.`);
   }
-  if (policy.gate.capture.phone === 'REQUIRED' && !input.visitorPhone) {
-    throw new VisitorError('A phone number is required for every visitor here.');
+
+  // Every capture rule below is about a VISITOR. A resident has already been
+  // identified by the flat they live in, and demanding their photo and phone
+  // at their own front gate is the surveillance this setting exists to refuse.
+  const isResident = input.category === RESIDENT_MOVEMENT;
+
+  if (!isResident) {
+    if (policy.gate.capture.phone === 'REQUIRED' && !input.visitorPhone) {
+      throw new VisitorError('A phone number is required for every visitor here.');
+    }
+    if (policy.gate.capture.photo === 'REQUIRED' && !input.photoKey) {
+      throw new VisitorError('A photo is required for every visitor here.');
+    }
+    if (!input.visitorName?.trim()) throw new VisitorError('Who is at the gate?');
+  } else if (!input.flatId) {
+    throw new VisitorError('Which flat is the resident from?');
   }
-  if (policy.gate.capture.photo === 'REQUIRED' && !input.photoKey) {
-    throw new VisitorError('A photo is required for every visitor here.');
-  }
-  if (!input.visitorName?.trim()) throw new VisitorError('Who is at the gate?');
 
   // The flat must be ours. A flatId from elsewhere would file a stranger's
   // visitor against a flat this society cannot even see.
@@ -109,21 +177,49 @@ export async function recordEntry(
     vehicleNumber: input.vehicleNumber,
   });
 
+  // The physical gate they came in by. Falls back to the society's only gate
+  // when it has one, so a single-gate society never has to pick.
+  const gate = input.entryGateId
+    ? await assertGateFor(societyId, input.entryGateId, 'entry')
+    : (await defaultGate(societyId).then(g => g ? { id: g._id as any, name: g.name } : undefined));
+
+  // The exit clock only starts once they are actually inside. An AWAITING or
+  // AT_GATE entry has not entered, so an expected-out time would generate a
+  // bogus overstay for somebody who was never admitted.
+  const inside = opts.status === 'INSIDE';
+
   const entry = await VisitorEntry.create({
     societyId: oid(societyId),
     entryCode: await nextEntryCode(societyId, now),
     category: input.category,
-    visitorName: input.visitorName.trim(),
-    visitorPhone: policy.gate.capture.phone === 'OFF' ? undefined : input.visitorPhone,
-    photoKey: policy.gate.capture.photo === 'OFF' ? undefined : input.photoKey,
-    idType: policy.gate.capture.idProof === 'OFF' ? undefined : input.idType,
-    idLast4: policy.gate.capture.idProof === 'OFF' ? undefined : input.idLast4,
+    // With `logVehicleOnly` the society has said it wants to know a car came
+    // in, not who was in it — so the name is deliberately replaced by the flat
+    // rather than merely left blank. Storing the name and choosing not to show
+    // it would be the same data with a thinner promise.
+    visitorName: isResident
+      ? (policy.gate.residents.logVehicleOnly
+          ? `Resident vehicle · ${flat ? `${flat.blockName || ''} ${flat.number}`.trim() : ''}`.trim()
+          : (input.visitorName?.trim() || 'Resident'))
+      : input.visitorName!.trim(),
+    visitorPhone: (isResident || policy.gate.capture.phone === 'OFF') ? undefined : input.visitorPhone,
+    photoKey: (isResident || policy.gate.capture.photo === 'OFF') ? undefined : input.photoKey,
+    idType: (isResident || policy.gate.capture.idProof === 'OFF') ? undefined : input.idType,
+    idLast4: (isResident || policy.gate.capture.idProof === 'OFF') ? undefined : input.idLast4,
     flatId: flat?._id,
     flatLabel: flat ? `${flat.blockName || ''} ${flat.number}`.trim() : undefined,
     blockId: flat?.blockId,
-    vehicleNumber: policy.gate.vehicles.track ? input.vehicleNumber : undefined,
-    vehiclePhotoKey: policy.gate.vehicles.track ? input.vehiclePhotoKey : undefined,
-    status: 'INSIDE',
+    // A resident movement carries its plate whatever `vehicles.track` says: the
+    // society switched resident logging on for the car, and dropping the number
+    // would leave a row that records nothing at all.
+    vehicleNumber: (isResident || policy.gate.vehicles.track) ? input.vehicleNumber : undefined,
+    vehiclePhotoKey: (!isResident && policy.gate.vehicles.track) ? input.vehiclePhotoKey : undefined,
+    status: opts.status,
+    admittedVia: inside ? opts.admittedVia : undefined,
+    approvalRequestId: opts.approvalRequestId ? oid(opts.approvalRequestId) : undefined,
+    gatePassId: opts.gatePassId ? oid(opts.gatePassId) : undefined,
+    decidedByName: opts.decidedByName,
+    decisionReason: opts.decisionReason,
+    decidedAt: opts.admittedVia ? now : undefined,
     enteredAt: now,
     // A warning, carried onto the record. The guard is not stopped — the
     // software cannot know whether tonight is the emergency — but "did anybody
@@ -132,29 +228,25 @@ export async function recordEntry(
     flaggedReason: flagged.blocked
       ? `Matched the blocklist on ${flagged.matchedOn?.toLowerCase()}: ${flagged.reason}`
       : undefined,
-    // Only meaningful when the society tracks exits at all — otherwise it would
-    // generate overstay alerts for a register that never records departures.
-    expectedOutAt: policy.gate.exit.trackExit ? new Date(now.getTime() + stay * 60_000) : undefined,
+    // No expected-out time for a resident. They live here; there is no length
+    // of stay at which somebody in their own home becomes an overstay to be
+    // reported to the committee.
+    expectedOutAt: (inside && !isResident && policy.gate.exit.trackExit)
+      ? new Date(now.getTime() + stay * 60_000) : undefined,
     isEstimated: false,
+    entryGateId: gate?.id,
+    entryGateName: gate?.name,
+    guardStaffId: input.guardStaffId ? oid(input.guardStaffId) : undefined,
     guardName: actor.userName,
     notes: input.notes,
     createdBy: oid(actor.userId), createdByName: actor.userName,
     updatedBy: oid(actor.userId), updatedByName: actor.userName,
   });
 
-  /**
-   * Tell the flat somebody has arrived.
-   *
-   * Not awaited: the guard is standing at the gate with a visitor in front of
-   * them, and the entry is already saved. A slow push must never be the reason
-   * the console spins.
-   *
-   * This is a *notice*, not an approval — nobody is being asked to allow
-   * anything, and the visitor is already inside. Approval is Phase 8, and
-   * conflating the two would mean shipping a message that implies a decision
-   * the software cannot yet act on.
-   */
-  if (entry.flatId) {
+  // A "somebody arrived" notice — a NOTICE, not an ask. Suppressed for an
+  // AWAITING entry, because the approval request already asked and a second
+  // message would read as two visitors.
+  if (opts.notifyArrival && entry.flatId && inside) {
     (async () => {
       const to = await usersOfFlat(societyId, String(entry.flatId));
       await notify({
@@ -170,18 +262,61 @@ export async function recordEntry(
   return entry;
 }
 
+/**
+ * Move an existing entry to its final state once a decision arrives.
+ *
+ * Used when a visitor was AWAITING and the flat (or the guard, or a timeout)
+ * has now answered. The entry already exists — the person was recorded the
+ * moment they reached the gate — so this only settles it.
+ */
+export async function settleEntry(
+  societyId: string, entryId: string,
+  decision: { status: EntryStatus; admittedVia?: AdmittedVia; decidedByName?: string; reason?: string },
+  actor: Actor,
+): Promise<IVisitorEntry | null> {
+  const entry = await VisitorEntry.findOne({ _id: oid(entryId), societyId: oid(societyId) });
+  // Only an entry still waiting may be settled. If it already resolved — a
+  // race between the resident tapping and the guard overriding — leave the
+  // first answer standing.
+  if (!entry || entry.status !== 'AWAITING') return entry;
+
+  const now = new Date();
+  entry.status = decision.status;
+  if (decision.status === 'INSIDE') {
+    entry.admittedVia = decision.admittedVia;
+    entry.enteredAt = now;
+    const policy = await getOrCreateOpsPolicy(societyId, actor.userId, actor.userName);
+    if (policy.gate.exit.trackExit) {
+      entry.expectedOutAt = new Date(now.getTime() + expectedStayFor(policy, entry.category) * 60_000);
+    }
+  }
+  entry.decidedByName = decision.decidedByName;
+  entry.decisionReason = decision.reason;
+  entry.decidedAt = now;
+  entry.updatedBy = oid(actor.userId); entry.updatedByName = actor.userName;
+  await entry.save();
+  return entry;
+}
+
 /** Mark a visitor as gone. */
 export async function recordExit(
-  societyId: string, entryId: string, actor: Actor, source: 'GUARD' | 'SCAN' = 'GUARD',
+  societyId: string, entryId: string, actor: Actor,
+  source: 'GUARD' | 'SCAN' = 'GUARD', exitGateId?: string,
 ): Promise<IVisitorEntry> {
   const entry = await VisitorEntry.findOne({ _id: entryId, societyId: oid(societyId) });
   if (!entry) throw new VisitorError('That entry could not be found.', 404);
   if (entry.status === 'LEFT') throw new VisitorError('That visitor is already marked as gone.');
   if (entry.status === 'DENIED') throw new VisitorError('That visitor was never let in.');
 
+  // The gate they LEFT by, which may differ from the one they came in by —
+  // that difference is the whole reason entry and exit gates are separate.
+  const gate = await assertGateFor(societyId, exitGateId, 'exit');
+
   entry.status = 'LEFT';
   entry.exitedAt = new Date();
   entry.exitSource = source;
+  entry.exitGateId = gate?.id;
+  entry.exitGateName = gate?.name;
   entry.isEstimated = false;
   entry.exitGuardName = actor.userName;
   entry.updatedBy = oid(actor.userId);
@@ -295,10 +430,18 @@ export async function listEntries(
 
 /** A presigned link for a visitor photo, checked against the same rules as the log. */
 export async function photoUrl(
-  societyId: string, entryId: string, which: 'visitor' | 'vehicle', residentFlatIds?: string[],
+  societyId: string, entryId: string, which: 'visitor' | 'vehicle',
+  residentFlatIds?: string[], access?: EffectiveAccess,
 ): Promise<string> {
   const filter: any = { _id: entryId, societyId: oid(societyId) };
   if (residentFlatIds) filter.flatId = { $in: residentFlatIds.map(oid) };
+
+  // The wing scope, which `listEntries` has always applied and this did not.
+  // A face photograph is the most sensitive thing the gate holds; it should be
+  // the LAST place a scope is forgotten, and it was the only one.
+  if (access && !access.isAdmin && !access.scope.allBlocks) {
+    filter.blockId = { $in: access.scope.blockIds.map(oid) };
+  }
 
   const entry = await VisitorEntry.findOne(filter).select('photoKey vehiclePhotoKey').lean();
   if (!entry) throw new VisitorError('That entry could not be found.', 404);

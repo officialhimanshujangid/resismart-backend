@@ -491,6 +491,10 @@ export const createExpenseSchema = z.object({
     fundId: z.string().regex(objectId).optional(),
     blockId: z.string().regex(objectId).optional(),
     staffId: z.string().regex(objectId).optional(),
+    // What it was spent on, in operations terms. Optional and descriptive —
+    // nothing in the posting logic reads them.
+    complaintId: z.string().regex(objectId).optional(),
+    assetId: z.string().regex(objectId).optional(),
   })).min(1, 'At least one expense line is required'),
 });
 

@@ -81,6 +81,30 @@ export const endEmployment = async (req: Request, res: Response) => {
   } catch (e: any) { fail(res, e, 'end that employment'); }
 };
 
+/**
+ * Give a staff member a login.
+ *
+ * The generated password comes back in the response, because there is no SMS
+ * gateway to send it through — the office reads it out. It is shown once and
+ * never stored in plain text anywhere.
+ */
+export const provisionLogin = async (req: Request, res: Response) => {
+  try {
+    const societyId = String(req.user!.activeTenantId);
+    const { staff: row, password } = await staff.provisionLogin(societyId, req.params.id, actorOf(req));
+    auditFinance(req, 'STAFF_LOGIN_PROVISIONED', 'SocietyStaff', String(row._id), {
+      newValues: { name: row.person.name },
+    });
+    res.json({
+      success: true,
+      data: { staff: row, password },
+      message: password
+        ? `Login created for ${row.person.name}. Password: ${password}`
+        : `${row.person.name} can now sign in with their existing account.`,
+    });
+  } catch (e: any) { fail(res, e, 'create that login'); }
+};
+
 export const assign = async (req: Request, res: Response) => {
   try {
     const societyId = String(req.user!.activeTenantId);
@@ -102,6 +126,13 @@ export const unassign = async (req: Request, res: Response) => {
 };
 
 /** Verifications lapsing soon, and what each agency actually has on site. */
+/** Who covers what — and, more usefully, what nobody covers. */
+export const coverage = async (req: Request, res: Response) => {
+  try {
+    res.json({ success: true, data: await staff.coverage(String(req.user!.activeTenantId)) });
+  } catch (e: any) { fail(res, e, 'work out who covers what'); }
+};
+
 export const alerts = async (req: Request, res: Response) => {
   try {
     const societyId = String(req.user!.activeTenantId);

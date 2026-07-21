@@ -43,6 +43,20 @@ const residentAId = new mongoose.Types.ObjectId();
 const rudeStaffUserId = new mongoose.Types.ObjectId();
 const actor = { userId: adminId.toString(), userName: 'Manager' };
 const resident = { userId: residentAId.toString(), userName: 'Asha Rao' };
+
+/**
+ * The scope each caller acts with — the same object the controller builds in
+ * `readerOpts` and hands to every action.
+ *
+ * Passing it here is not ceremony: without it a caller can only touch a
+ * complaint they raised or their own flat's, which is the whole point of the
+ * `actable` gate. A test that called the services scope-less would be testing
+ * a door that production never opens.
+ */
+const mgrScope = { canManage: true, userId: adminId.toString() };
+// `plumberScope` is filled in once the staff record exists (its _id is the
+// assignee id). Declared here so every call site can name it.
+let plumberScope: any = { canManage: false };
 const SID = societyId.toString();
 const OTHER = otherId.toString();
 
@@ -88,6 +102,9 @@ async function main() {
     const liftCo = await Vendor.create({ ...audit(societyId), name: 'Otis AMC', phone: '9000000001', isActive: true });
 
     const plumber = await createStaff(SID, { name: 'Vijay', phone: '9800000001', designation: 'PLUMBER' }, actor);
+    // The plumber acts on their own queue: ownStaffId is their staff _id, and
+    // `actable` lets them touch only complaints assigned to it.
+    plumberScope = { canManage: false, ownStaffId: String(plumber._id), userId: String(plumber._id) };
     const cleaner = await createStaff(SID, { name: 'Suresh', phone: '9800000002', designation: 'HOUSEKEEPING' }, actor);
     await SocietyStaff.updateOne({ _id: cleaner._id }, { $set: { userId: rudeStaffUserId } });
 
@@ -181,17 +198,17 @@ async function main() {
 
     // ============================================== who may say it is finished
     console.log('\nThe person who did the work does not get to close it');
-    await respond(SID, String(leaking._id), 'Coming this evening', { userId: String(plumber._id), userName: 'Vijay' });
+    await respond(SID, String(leaking._id), "Coming this evening", { userId: String(plumber._id), userName: "Vijay" }, plumberScope);
     const responded = await Complaint.findById(leaking._id).lean();
     ok('the first reply is timestamped separately', Boolean(responded?.firstRespondedAt));
     eq('...and the status moves on', responded?.status, 'IN_PROGRESS');
 
-    await markWorkDone(SID, String(leaking._id), 'Washer replaced', [], { userId: String(plumber._id), userName: 'Vijay' });
+    await markWorkDone(SID, String(leaking._id), "Washer replaced", [], { userId: String(plumber._id), userName: "Vijay" }, plumberScope);
     const done = await Complaint.findById(leaking._id).lean();
     eq('the plumber can say the work is done', done?.status, 'WORK_DONE');
     ok('...but that is NOT closed', done?.status !== 'CLOSED' && done?.status !== 'RESOLVED');
 
-    await resolve(SID, String(leaking._id), resident);
+    await resolve(SID, String(leaking._id), resident, { userId: residentAId.toString(), residentFlatIds: [String(a101._id)] });
     const confirmed = await Complaint.findById(leaking._id).lean();
     eq('the resident confirms it', confirmed?.status, 'RESOLVED');
     ok('...and that is when the resolution is stamped', Boolean(confirmed?.resolvedAt));
@@ -203,13 +220,13 @@ async function main() {
     }, resident);
     const beforeDue = (await Complaint.findById(locked._id).lean())!.resolutionDueAt!;
 
-    await pause(SID, String(locked._id), 'AWAITING_ACCESS', { userId: String(plumber._id), userName: 'Vijay' });
+    await pause(SID, String(locked._id), "AWAITING_ACCESS", { userId: String(plumber._id), userName: "Vijay" }, plumberScope);
     const paused = await Complaint.findById(locked._id).lean();
     eq('it goes on hold', paused?.status, 'ON_HOLD');
     eq('...for a reason from the list', paused?.pauseReason, 'AWAITING_ACCESS');
 
     let freeText = '';
-    try { await pause(SID, String(orphan._id), 'BECAUSE_I_SAID' as any, actor); }
+    try { await pause(SID, String(orphan._id), "BECAUSE_I_SAID" as any, actor, mgrScope); }
     catch (e: any) { freeText = e.message; }
     ok('a made-up reason is refused — otherwise every ticket is "on hold"',
       freeText.includes('not one of the reasons'), freeText);
@@ -218,7 +235,7 @@ async function main() {
     await Complaint.collection.updateOne(
       { _id: locked._id }, { $set: { pausedAt: new Date(Date.now() - 60 * 60_000) } },
     );
-    await resume(SID, String(locked._id), { userId: String(plumber._id), userName: 'Vijay' });
+    await resume(SID, String(locked._id), { userId: String(plumber._id), userName: "Vijay" }, plumberScope);
     const resumed = await Complaint.findById(locked._id).lean();
     eq('...and comes back off hold', resumed?.status, 'IN_PROGRESS');
     ok('the deadline moved out by the time nobody could work',
@@ -228,39 +245,39 @@ async function main() {
       (resumed?.totalPausedMs || 0) > 50 * 60_000, String(resumed?.totalPausedMs));
 
     let pauseFinished = '';
-    try { await pause(SID, String(leaking._id), 'AWAITING_PARTS', actor); }
+    try { await pause(SID, String(leaking._id), "AWAITING_PARTS", actor, mgrScope); }
     catch (e: any) { pauseFinished = e.message; }
     ok('something already finished cannot be put on hold', pauseFinished.includes('already finished'), pauseFinished);
 
     // ============================================================== reopening
     console.log('\nReopening is counted, not erased');
-    await close(SID, String(leaking._id), actor);
-    await reopen(SID, String(leaking._id), 'Still dripping', resident);
+    await close(SID, String(leaking._id), actor, mgrScope);
+    await reopen(SID, String(leaking._id), "Still dripping", resident, { userId: residentAId.toString(), residentFlatIds: [String(a101._id)] });
     const reopened = await Complaint.findById(leaking._id).lean();
     eq('the count goes up', reopened?.reopenCount, 1);
     eq('...and the status says so', reopened?.status, 'REOPENED');
     ok('...and the resolution stamp is cleared, so it is genuinely open again',
       !reopened?.resolvedAt && !reopened?.closedAt);
 
-    await close(SID, String(leaking._id), actor);
-    await reopen(SID, String(leaking._id), 'Again', resident);
+    await close(SID, String(leaking._id), actor, mgrScope);
+    await reopen(SID, String(leaking._id), "Again", resident, { userId: residentAId.toString(), residentFlatIds: [String(a101._id)] });
     eq('a second reopen counts twice', (await Complaint.findById(leaking._id).lean())?.reopenCount, 2);
 
     let notOpen = '';
-    try { await reopen(SID, String(orphan._id), 'x', resident); }
+    try { await reopen(SID, String(orphan._id), "x", resident, mgrScope); }
     catch (e: any) { notOpen = e.message; }
     ok('something still open cannot be reopened', notOpen.includes('still open'), notOpen);
 
     // ================================================================ me too
     console.log('\n"Me too" — forty tickets become one');
-    await meToo(SID, String(community._id), resident);
+    await meToo(SID, String(community._id), resident, { userId: residentAId.toString(), residentFlatIds: [String(a101._id)] });
     const joined = await Complaint.findById(community._id).lean();
     eq('the resident is recorded as affected', joined?.meTooUserIds.length, 1);
-    await meToo(SID, String(community._id), resident);
+    await meToo(SID, String(community._id), resident, { userId: residentAId.toString(), residentFlatIds: [String(a101._id)] });
     eq('...and joining twice does not double-count', (await Complaint.findById(community._id).lean())?.meTooUserIds.length, 1);
 
     let personalJoin = '';
-    try { await meToo(SID, String(orphan._id), resident); }
+    try { await meToo(SID, String(orphan._id), resident, { userId: residentAId.toString(), residentFlatIds: [String(a101._id)] }); }
     catch (e: any) { personalJoin = e.message; }
     ok('you cannot join somebody\'s private complaint', personalJoin.includes('community'), personalJoin);
 

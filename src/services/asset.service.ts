@@ -3,6 +3,8 @@ import { Asset, IAsset, ASSET_CATEGORIES } from '../models/asset.model';
 import { Block } from '../models/block.model';
 import { Vendor } from '../models/vendor.model';
 import { ComplaintCategory } from '../models/complaint-category.model';
+import { notify } from './notification.service';
+import { usersOfCommittee } from './notify-recipients';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
 
@@ -63,9 +65,33 @@ export async function updateAsset(societyId: string, id: string, body: any, acto
   if (body.location !== undefined) asset.location = body.location;
   if (body.notes !== undefined) asset.notes = body.notes;
   if (body.amcExpiresOn !== undefined) {
-    asset.amcExpiresOn = body.amcExpiresOn ? new Date(body.amcExpiresOn) : undefined;
+    const next = body.amcExpiresOn ? new Date(body.amcExpiresOn) : undefined;
+    // A new expiry is a new contract period — clear the warn marker so the
+    // sweep will alert on the new date. Without this, extending an AMC would
+    // silently suppress next year's warning.
+    if (String(next) !== String(asset.amcExpiresOn)) asset.amcWarnedForExpiry = undefined;
+    asset.amcExpiresOn = next;
   }
   if (body.isActive !== undefined) asset.isActive = body.isActive;
+
+  // Correcting the wing or the kind of machine. `updateAsset` used to refuse
+  // both, so a lift filed under the wrong wing could never be fixed — and a
+  // complaint scanned from its sticker routed to the wrong block forever.
+  if (body.category !== undefined) {
+    if (!ASSET_CATEGORIES.includes(body.category)) throw new AssetError('That is not a kind of equipment.');
+    asset.category = body.category;
+  }
+  if (body.blockId !== undefined) {
+    if (body.blockId) {
+      const block = await Block.findOne({ _id: body.blockId, societyId: oid(societyId) }).select('name').lean();
+      if (!block) throw new AssetError('That wing does not belong to this society.');
+      asset.blockId = oid(body.blockId);
+      asset.blockName = block.name;
+    } else {
+      asset.blockId = undefined;
+      asset.blockName = undefined;
+    }
+  }
   if (body.vendorId !== undefined) {
     if (body.vendorId) {
       const vendor = await Vendor.findOne({ _id: body.vendorId, societyId: oid(societyId), isActive: true })
@@ -136,8 +162,50 @@ export async function resolveScan(qrToken: string): Promise<ScanResult> {
 /** AMCs running out, so a renewal conversation starts before the cover lapses. */
 export async function findExpiringAmcs(societyId: string, withinDays = 45, at = new Date()) {
   const horizon = new Date(at.getTime() + withinDays * 86_400_000);
+  // A LOWER bound too. Without it the query returned AMCs that expired years
+  // ago alongside ones running out next month, sorted oldest-first — so the
+  // banner filled with long-dead contracts and buried the actionable ones.
+  // A grace of 30 days keeps a just-lapsed one visible (that is the one the
+  // society still needs to chase), but not one from 2019.
+  const floor = new Date(at.getTime() - 30 * 86_400_000);
   return Asset.find({
     societyId: oid(societyId), isActive: true,
-    amcExpiresOn: { $ne: null, $lte: horizon },
-  }).select('assetCode name vendorName amcExpiresOn blockName').sort({ amcExpiresOn: 1 }).lean();
+    amcExpiresOn: { $gte: floor, $lte: horizon },
+  }).select('assetCode name vendorName vendorId amcExpiresOn blockName blockId').sort({ amcExpiresOn: 1 }).lean();
+}
+
+/**
+ * Warn the committee about AMCs running out. The cron caller that turns the
+ * passive banner into an actual nudge.
+ *
+ * De-duplicated by a marker so the daily sweep does not send the same warning
+ * every morning for thirty days — one warning per contract per expiry.
+ */
+export async function sweepExpiringAmcs(societyId: string, at = new Date()): Promise<number> {
+  const expiring = await Asset.find({
+    societyId: oid(societyId), isActive: true,
+    amcExpiresOn: { $gte: at, $lte: new Date(at.getTime() + 30 * 86_400_000) },
+    // Not already warned for THIS expiry date.
+    $or: [
+      { amcWarnedForExpiry: { $exists: false } },
+      { $expr: { $ne: ['$amcWarnedForExpiry', '$amcExpiresOn'] } },
+    ],
+  }).lean();
+  if (!expiring.length) return 0;
+
+  const committee = await usersOfCommittee(societyId);
+  for (const a of expiring) {
+    if (committee.length) {
+      await notify({
+        societyId, userIds: committee, kind: 'AMC_EXPIRING',
+        title: `AMC running out: ${a.name}`,
+        body: `${a.name}${a.blockName ? ` (${a.blockName})` : ''} — ${a.vendorName || 'no vendor'}, expires ${a.amcExpiresOn?.toLocaleDateString('en-IN')}. A lapse makes the next breakdown the society's bill.`,
+        link: '/dashboard/assets',
+        entityType: 'Asset', entityId: String(a._id),
+        emailIfUnreachable: true,
+      }).catch(() => undefined);
+    }
+    await Asset.updateOne({ _id: a._id }, { $set: { amcWarnedForExpiry: a.amcExpiresOn } }).catch(() => undefined);
+  }
+  return expiring.length;
 }

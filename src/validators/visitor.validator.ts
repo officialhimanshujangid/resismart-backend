@@ -1,11 +1,18 @@
 import { z } from 'zod';
-import { VISITOR_CATEGORIES, OPS_MODULES } from '../models/society-ops-policy.model';
+import { VISITOR_CATEGORIES, OPS_MODULES, RESIDENT_MOVEMENT } from '../models/society-ops-policy.model';
 
 const objectId = /^[0-9a-fA-F]{24}$/;
 
 export const recordEntrySchema = z.object({
-  category: z.enum(VISITOR_CATEGORIES),
-  visitorName: z.string().min(1, 'Who is at the gate?').max(120),
+  // RESIDENT is accepted here but is NOT one of the visitor categories — the
+  // service refuses it unless the society has switched resident logging on.
+  // The check belongs there rather than here because it depends on the
+  // society's policy, which a schema cannot see.
+  category: z.enum([...VISITOR_CATEGORIES, RESIDENT_MOVEMENT]),
+  // Optional, because a resident recorded under `logVehicleOnly` is a plate and
+  // a flat — deliberately not a named person. `createEntry` still insists on a
+  // name for every actual visitor.
+  visitorName: z.string().max(120).optional(),
   visitorPhone: z.string().max(20).optional(),
   photoKey: z.string().max(300).optional(),
   idType: z.string().max(40).optional(),
@@ -16,6 +23,23 @@ export const recordEntrySchema = z.object({
   vehicleNumber: z.string().max(20).optional(),
   vehiclePhotoKey: z.string().max(300).optional(),
   notes: z.string().max(500).optional(),
+  /**
+   * Which physical gate they came in by.
+   *
+   * Absent from this schema until a verify script caught it, and the failure
+   * mode is the quiet one: zod strips unknown keys, so the console sent the
+   * gate, the schema dropped it on the floor, and `createEntry` — which reads
+   * it, resolves it and stamps a name onto the record — silently fell back to
+   * the single-gate default on every single entry. Nothing errored. The gate
+   * column was simply always blank, which reads as "we never filled it in"
+   * rather than "the software threw it away".
+   */
+  entryGateId: z.string().regex(objectId).optional(),
+});
+
+/** Marking somebody out, optionally naming the door they left by. */
+export const recordExitSchema = z.object({
+  exitGateId: z.string().regex(objectId).optional(),
 });
 
 const captureRule = z.enum(['OFF', 'OPTIONAL', 'REQUIRED']);

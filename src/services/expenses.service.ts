@@ -3,6 +3,8 @@ import { Expense, IExpense } from '../models/expense.model';
 import { Vendor } from '../models/vendor.model';
 import { Block } from '../models/block.model';
 import { SocietyStaff } from '../models/society-staff.model';
+import { Complaint } from '../models/complaint.model';
+import { Asset } from '../models/asset.model';
 import { LedgerAccount } from '../models/ledger-account.model';
 import { postJournal, PostLineInput } from './ledger.service';
 import { nextDocNumber } from './finance-sequence.service';
@@ -182,6 +184,24 @@ export async function createExpense(societyId: string, body: any, actor: Actor):
   const staffById = new Map(staffRows.map(s => [String(s._id), s.person.name]));
   for (const id of staffIds) if (!staffById.has(id)) throw new Error('Staff member not found');
 
+  // What the money was spent ON — the complaint it settled, the machine it was
+  // for. Same treatment again: scoped to this society so a voucher cannot be
+  // tagged with somebody else's lift, and the label snapshotted so the voucher
+  // still reads years after the complaint is archived.
+  const complaintIds = [...new Set(lines.map((l: any) => l.complaintId).filter(Boolean))].map(String);
+  const complaintRows = complaintIds.length
+    ? await Complaint.find({ _id: { $in: complaintIds }, societyId }).select('ticketCode').lean()
+    : [];
+  const complaintById = new Map(complaintRows.map(c => [String(c._id), c.ticketCode]));
+  for (const id of complaintIds) if (!complaintById.has(id)) throw new Error('Complaint not found');
+
+  const assetIds = [...new Set(lines.map((l: any) => l.assetId).filter(Boolean))].map(String);
+  const assetRows = assetIds.length
+    ? await Asset.find({ _id: { $in: assetIds }, societyId }).select('name').lean()
+    : [];
+  const assetById = new Map(assetRows.map(a => [String(a._id), a.name]));
+  for (const id of assetIds) if (!assetById.has(id)) throw new Error('Equipment not found');
+
   const { number } = await nextDocNumber(societyId, 'PAYMENT', fyString, { prefix: policy.numbering.voucher.prefix, padding: policy.numbering.voucher.padding, template: policy.numbering.voucher.template });
 
   return Expense.create({
@@ -194,6 +214,10 @@ export async function createExpense(societyId: string, body: any, actor: Actor):
       blockName: l.blockId ? blockById.get(String(l.blockId)) : undefined,
       staffId: l.staffId || undefined,
       staffName: l.staffId ? staffById.get(String(l.staffId)) : undefined,
+      complaintId: l.complaintId || undefined,
+      complaintCode: l.complaintId ? complaintById.get(String(l.complaintId)) : undefined,
+      assetId: l.assetId || undefined,
+      assetName: l.assetId ? assetById.get(String(l.assetId)) : undefined,
     })),
     grossPaise, tdsPaise, netPayablePaise,
     paymentMode: body.paymentMode,

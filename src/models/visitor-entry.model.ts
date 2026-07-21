@@ -16,8 +16,35 @@ import mongoose, { Schema, Document } from 'mongoose';
  * which is the part that can be acted on.
  */
 
-export type EntryStatus = 'INSIDE' | 'LEFT' | 'DENIED';
+/**
+ * Every state a visit can be in, and the reason there are more than three.
+ *
+ * The old set — INSIDE / LEFT / DENIED — could only describe a visit that was
+ * already resolved. It had no way to say "standing at the gate, waiting for the
+ * flat to answer", so the console never asked: it went straight to INSIDE and
+ * the whole approval module became unreachable. A person physically at the gate
+ * is a real state, and the record has to be able to hold it.
+ *
+ *   AWAITING  — at the gate, the flat has been asked, nobody is inside yet
+ *   AT_GATE   — a delivery left at the gate; the courier did not come in
+ *   INSIDE    — admitted and present
+ *   LEFT      — gone (recorded, scanned, or guessed by the nightly job)
+ *   DENIED    — refused, by the flat or the guard
+ */
+export type EntryStatus = 'AWAITING' | 'AT_GATE' | 'INSIDE' | 'LEFT' | 'DENIED';
 export type ExitSource = 'GUARD' | 'SCAN' | 'AUTO_CLOSE';
+
+/**
+ * HOW they came to be inside — the single field that makes the gate auditable.
+ *
+ *   GUARD            — the guard logged them, no approval was required
+ *   RESIDENT_APPROVAL — a resident tapped allow
+ *   PASS             — they redeemed a pre-issued invitation
+ *   EXPECTED         — the flat had listed them as an expected visitor
+ *   OVERRIDE         — the guard decided without waiting, with a reason on record
+ *   NOTIFY           — approval was NOTIFY_ONLY; the flat was told, not asked
+ */
+export type AdmittedVia = 'GUARD' | 'RESIDENT_APPROVAL' | 'PASS' | 'EXPECTED' | 'OVERRIDE' | 'NOTIFY';
 
 export interface IVisitorEntry extends Document {
   societyId: mongoose.Types.ObjectId;
@@ -32,6 +59,16 @@ export interface IVisitorEntry extends Document {
   idType?: string;
   idLast4?: string;
 
+  /**
+   * The physical gate they came in by, and — separately — the one they left by.
+   * Two fields because "came in the main gate, left by the service gate" is a
+   * real and useful thing to know, and a single gateId cannot hold it.
+   */
+  entryGateId?: mongoose.Types.ObjectId;
+  entryGateName?: string;
+  exitGateId?: mongoose.Types.ObjectId;
+  exitGateName?: string;
+
   /** Who they came to see. Absent for a society-wide visitor (a contractor). */
   flatId?: mongoose.Types.ObjectId;
   flatLabel?: string;
@@ -41,6 +78,17 @@ export interface IVisitorEntry extends Document {
   vehiclePhotoKey?: string;
 
   status: EntryStatus;
+  /** How they got in. Absent while AWAITING — set the moment they are admitted. */
+  admittedVia?: AdmittedVia;
+  /** The approval this entry came from, when one was raised. Closes the dangling link. */
+  approvalRequestId?: mongoose.Types.ObjectId;
+  /** The pass this entry burned, when a QR or code was scanned. */
+  gatePassId?: mongoose.Types.ObjectId;
+  /** Who admitted or refused them, and why — for the record, and for an override. */
+  decidedByName?: string;
+  decisionReason?: string;
+  decidedAt?: Date;
+
   enteredAt: Date;
   /** What the policy expects for this category — gives exit a forcing function. */
   expectedOutAt?: Date;
@@ -88,6 +136,11 @@ const VisitorEntrySchema = new Schema<IVisitorEntry>({
   idType: { type: String },
   idLast4: { type: String },
 
+  entryGateId: { type: Schema.Types.ObjectId, ref: 'Gate' },
+  entryGateName: { type: String },
+  exitGateId: { type: Schema.Types.ObjectId, ref: 'Gate' },
+  exitGateName: { type: String },
+
   flatId: { type: Schema.Types.ObjectId, ref: 'Flat' },
   flatLabel: { type: String },
   blockId: { type: Schema.Types.ObjectId, ref: 'Block' },
@@ -95,7 +148,13 @@ const VisitorEntrySchema = new Schema<IVisitorEntry>({
   vehicleNumber: { type: String, trim: true, uppercase: true },
   vehiclePhotoKey: { type: String },
 
-  status: { type: String, enum: ['INSIDE', 'LEFT', 'DENIED'], default: 'INSIDE' },
+  status: { type: String, enum: ['AWAITING', 'AT_GATE', 'INSIDE', 'LEFT', 'DENIED'], default: 'INSIDE' },
+  admittedVia: { type: String, enum: ['GUARD', 'RESIDENT_APPROVAL', 'PASS', 'EXPECTED', 'OVERRIDE', 'NOTIFY'] },
+  approvalRequestId: { type: Schema.Types.ObjectId, ref: 'ApprovalRequest' },
+  gatePassId: { type: Schema.Types.ObjectId, ref: 'GatePass' },
+  decidedByName: { type: String, trim: true },
+  decisionReason: { type: String, trim: true, maxlength: 300 },
+  decidedAt: { type: Date },
   enteredAt: { type: Date, required: true, default: Date.now },
   expectedOutAt: { type: Date },
   exitedAt: { type: Date },

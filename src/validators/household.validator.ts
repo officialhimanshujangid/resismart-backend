@@ -33,6 +33,20 @@ export const updateMemberSchema = z.object({
 export const addDocumentSchema = z.object({
   kind: z.string().trim().optional(),
   label: z.string().trim().min(1, 'Label is required'),
-  key: z.string().trim().min(1, 'key is required'),
+  /**
+   * The key must be one our own upload route minted.
+   *
+   * `flat-document.service.ts:127` already defends this exact attack and says
+   * why: without the prefix a caller can attach ANY object in the bucket —
+   * including another society's — to their own record, then read it back
+   * through the presigned-download endpoint. The household and tenancy paths
+   * accepted a bare string, so the defence existed on one of three doors.
+   */
+  key: z.string().trim().min(1, 'key is required')
+    // `flat-documents` is the only prefix `POST /upload/document` writes to
+    // (upload.routes.ts:35). Accepting a second, wider prefix "just in case"
+    // would reopen the hole this closes.
+    .refine(k => k.startsWith('flat-documents/'),
+      'That file was not uploaded through the document uploader'),
   url: z.string().trim().url('Invalid url'),
 });

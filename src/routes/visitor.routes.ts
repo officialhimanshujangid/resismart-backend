@@ -2,14 +2,16 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
 import { requirePermission, attachAccess } from '../middlewares/access.middleware';
+import { requireOpsSetup } from '../middlewares/ops-setup.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import { UserRole } from '../constants/roles';
 import * as controller from '../controllers/visitor.controller';
 import * as approvalController from '../controllers/gate-approval.controller';
 import * as passController from '../controllers/gate-pass.controller';
 import * as depthController from '../controllers/gate-depth.controller';
+import * as gateController from '../controllers/gate-crud.controller';
 import {
-  recordEntrySchema, updateOpsPolicySchema, askApprovalSchema,
+  recordEntrySchema, recordExitSchema, updateOpsPolicySchema, askApprovalSchema,
   decideApprovalSchema, overrideApprovalSchema, gatePreferenceSchema,
   issuePassSchema, revokePassSchema, redeemPassSchema, syncPassesSchema,
   addVehicleSchema, blockSchema, unblockSchema,
@@ -42,8 +44,8 @@ const SOCIETY_ROLES = [
 ];
 
 // ------------------------------------------------------------- gate console
-router.post('/entries', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), validate(recordEntrySchema), controller.recordEntry);
-router.post('/entries/:id/exit', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), controller.recordExit);
+router.post('/entries', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), requireOpsSetup, validate(recordEntrySchema), controller.recordEntry);
+router.post('/entries/:id/exit', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), validate(recordExitSchema), controller.recordExit);
 router.get('/inside', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'READ'), attachAccess, controller.inside);
 router.get('/flats', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'READ'), controller.flatOptions);
 
@@ -53,7 +55,10 @@ router.get('/flats', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission
 // their own flats. Sending them somewhere else would mean a second endpoint
 // with a second copy of the same privacy rule to keep in step.
 router.get('/entries', authorizeRoles(SOCIETY_ROLES), attachAccess, controller.list);
-router.get('/entries/:id/photo', authorizeRoles(SOCIETY_ROLES), controller.photo);
+// `attachAccess` was missing here, so a committee member scoped to A wing could
+// pull C wing's visitor face photographs — the exact failure the wing scope was
+// written to prevent, on the one endpoint that serves biometric-adjacent data.
+router.get('/entries/:id/photo', authorizeRoles(SOCIETY_ROLES), attachAccess, controller.photo);
 
 router.get('/reconciliation', authorizeRoles(GUARD_ROLES), requirePermission('GATE_LOGS', 'READ'), controller.reconciliation);
 
@@ -86,7 +91,12 @@ router.post('/passes', authorizeRoles(SOCIETY_ROLES), validate(issuePassSchema),
 router.post('/passes/:id/revoke', authorizeRoles(SOCIETY_ROLES), validate(revokePassSchema), passController.revoke);
 
 router.get('/passes/scanner-config', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'READ'), passController.scannerConfig);
-router.post('/passes/redeem', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), validate(redeemPassSchema), passController.redeem);
+// A live scan burns the pass AND writes the entry, joined — that is what
+// `controller.scanEntry` does. The old `passController.redeem` only burned the
+// pass, leaving a scanned visitor nowhere in the register; it is kept below
+// only for the OFFLINE sync, where the device already admitted them and this
+// is reconciliation, not admission.
+router.post('/passes/redeem', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), validate(redeemPassSchema), controller.scanEntry);
 router.post('/passes/sync', gateLimiter, authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'FULL'), validate(syncPassesSchema), passController.sync);
 
 // -------------------------------------------------------- vehicles & depth
@@ -104,11 +114,23 @@ router.post('/blocklist/:id/lift', authorizeRoles([UserRole.SOCIETY_ADMIN, UserR
 
 router.get('/report', authorizeRoles(GUARD_ROLES), requirePermission('GATE_LOGS', 'READ'), depthController.report);
 
+// -------------------------------------------------------------------- gates
+// The physical gates a society has. Reading is gate work; managing them is a
+// settings-level act, so it carries OPS_SETTINGS.
+router.get('/gates', authorizeRoles(GUARD_ROLES), requirePermission('GATE_CONSOLE', 'READ'), gateController.list);
+router.post('/gates', authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), requirePermission('OPS_SETTINGS', 'FULL'), gateController.create);
+router.put('/gates/:id', authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), requirePermission('OPS_SETTINGS', 'FULL'), gateController.update);
+router.post('/gates/:id/retire', authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), requirePermission('OPS_SETTINGS', 'FULL'), gateController.retire);
+
 // ------------------------------------------------------------------ settings
 // Which modules the society uses. Open to every member: it drives the sidebar,
 // and a resident being unable to read it is why the Complaints link would
 // otherwise appear in a society that has complaints switched off.
 router.get('/modules', authorizeRoles(SOCIETY_ROLES), controller.getModules);
+
+// The setup checklist. Open to any society member who can reach operations —
+// the guard needs to see why the console refused them, not just that it did.
+router.get('/setup', authorizeRoles(GUARD_ROLES), controller.setup);
 
 router.get('/policy', authorizeRoles(GUARD_ROLES), requirePermission('OPS_SETTINGS', 'READ'), controller.getPolicy);
 router.put('/policy', authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE]), requirePermission('OPS_SETTINGS', 'FULL'), validate(updateOpsPolicySchema), controller.updatePolicy);

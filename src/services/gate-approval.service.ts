@@ -1,9 +1,10 @@
 import mongoose from 'mongoose';
 import { ApprovalRequest, IApprovalRequest, ApprovalOutcome } from '../models/approval-request.model';
 import { ResidentGatePreference } from '../models/resident-gate-preference.model';
-import { SocietyOpsPolicy, IApprovalRule, ApprovalMode } from '../models/society-ops-policy.model';
+import { SocietyOpsPolicy, IApprovalRule, ApprovalMode, RESIDENT_MOVEMENT } from '../models/society-ops-policy.model';
 import { Resident } from '../models/resident.model';
 import { Flat, FlatStatus } from '../models/flat.model';
+import { VisitorEntry } from '../models/visitor-entry.model';
 import { getOrCreateOpsPolicy, approvalRuleFor } from './ops-policy.service';
 import { usersOfCommittee } from './notify-recipients';
 import { notify } from './notification.service';
@@ -220,6 +221,14 @@ export interface RequestResult {
 export async function requestApproval(
   societyId: string, input: RequestInput, actor: Actor,
 ): Promise<RequestResult> {
+  // A resident is never asked for permission to enter their own home, and the
+  // flat is never notified that its own household arrived. Returned before the
+  // policy is even loaded, so no setting a society could choose can turn this
+  // into a request — including a CUSTOM approval map with a stray RESIDENT key.
+  if (input.category === RESIDENT_MOVEMENT) {
+    return { request: null, verdict: 'LET_IN', reason: 'A resident of this flat' };
+  }
+
   const policy = await getOrCreateOpsPolicy(societyId, actor.userId, actor.userName);
   const rule = await effectivePolicy(societyId, input.category, { flatId: input.flatId });
 
@@ -239,6 +248,39 @@ export async function requestApproval(
   }
 
   const audience = await whoToAsk(societyId, input.flatId);
+
+  /**
+   * An empty flat: the committee is TOLD, never ASKED.
+   *
+   * This used to raise a real approval request against every serving committee
+   * member, and a resident of A-102 would find "somebody is at the gate for
+   * A-103, let them in?" sitting in their own approvals list — indistinguishable
+   * from a question about their own home. They reasonably read it as a leak.
+   *
+   * It was not a leak, but it was worse than one in a way: a committee member
+   * has no basis whatsoever to say yes to a stranger at an empty flat. They do
+   * not know who is expected there; nobody is. Asking them manufactures a
+   * decision out of nothing and then records it as though somebody had
+   * authority. The guard is the only person who can actually judge who is
+   * standing there, so the guard decides — and the committee finds out, which
+   * is the part that genuinely matters for an empty flat.
+   */
+  if (audience.via === 'VACANT_COMMITTEE') {
+    if (audience.userIds.length) {
+      await notify({
+        societyId, userIds: audience.userIds,
+        kind: 'GATE_VACANT_FLAT',
+        title: `Somebody came to ${input.flatId ? 'an empty flat' : 'the gate'}`,
+        body: `${input.visitorName} — ${input.category.toLowerCase()}. That flat is empty, so the guard decided.`,
+        link: '/dashboard/gate/log',
+      }).catch(e => logger.error(`Could not tell the committee about a vacant-flat caller: ${e.message}`));
+    }
+    return {
+      request: null,
+      verdict: 'LET_IN',
+      reason: 'That flat is empty — your decision, and the committee will be told',
+    };
+  }
 
   if (rule.effectiveMode === 'NOTIFY_ONLY') {
     await tellTheFlat(societyId, input, 'GATE_ARRIVAL', `${input.visitorName} is at the gate`, actor);
@@ -471,6 +513,17 @@ export async function sweepExpired(now = new Date()): Promise<{ resolved: number
     );
     if (claim.modifiedCount === 0) continue;   // a resident answered in the same instant; theirs wins
     resolved++;
+
+    // Settle the waiting entry to match. AUTO_DENY turns it away; HOLD and
+    // GUARD_DECIDES leave it AWAITING, because the guard is still expected to
+    // make the call — the timeout only means "nobody upstairs answered", not
+    // "this person goes home". The model, not the service, so no import cycle.
+    if (req.visitorEntryId && req.onTimeout === 'AUTO_DENY') {
+      await VisitorEntry.updateOne(
+        { _id: req.visitorEntryId, status: 'AWAITING' },
+        { $set: { status: 'DENIED', decidedByName: 'No answer', decidedAt: now } },
+      ).catch(e => logger.error(`Could not deny timed-out entry: ${e.message}`));
+    }
 
     publishToSociety(String(req.societyId), 'gate-approval', {
       _id: String(req._id), outcome, visitorName: req.visitorName,

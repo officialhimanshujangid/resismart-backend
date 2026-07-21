@@ -94,7 +94,19 @@ const otpLimiter = rateLimit({
 
 // 5. Razorpay webhook — MUST receive the raw body for signature verification,
 //    so it is mounted before the JSON body parser.
-app.use('/api/v1/webhooks', express.raw({ type: '*/*' }), webhookRoutes);
+//
+//    It also sits ABOVE the limiters below, so it needs its own — otherwise it
+//    is the one unauthenticated surface in the product with no ceiling at all,
+//    and every request costs a per-society secret lookup. Sized for a payment
+//    provider's retry behaviour, not a human's.
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many webhook deliveries.' },
+});
+app.use('/api/v1/webhooks', webhookLimiter, express.raw({ type: '*/*' }), webhookRoutes);
 
 // 6. Body Parsers
 app.use(express.json({ limit: '1mb' }));
@@ -103,7 +115,15 @@ app.use(express.urlencoded({ extended: true }));
 // 7. Apply rate limiters (otp limiter first so it owns /auth/otp)
 app.use('/api/v1/auth/otp', otpLimiter);
 app.use('/api/v1/auth', authLimiter);
-app.use('/api', generalLimiter);
+//
+// The gate is exempt from the general limiter and carries its own inside
+// `visitor.routes.ts`. It has to be: a busy gate logs an entry a minute and
+// polls "who is inside" constantly, so 300-per-15-minutes cuts the guard off
+// mid-shift — at which point they fall back to paper and the evening's record
+// is lost. That gate limiter existed already and was DEAD, because this line
+// ran first and refused the request before the router was ever reached.
+app.use('/api', (req, res, next) =>
+  req.path.startsWith('/v1/gate') ? next() : generalLimiter(req, res, next));
 
 // 8. Base route
 app.get('/', (_req, res) => {

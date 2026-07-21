@@ -9,6 +9,7 @@ import { GatePass } from '../models/gate-pass.model';
 import { VisitorEntry } from '../models/visitor-entry.model';
 import { Complaint } from '../models/complaint.model';
 import { SocietyStaff } from '../models/society-staff.model';
+import { Asset } from '../models/asset.model';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
 
@@ -299,7 +300,10 @@ export async function opsReport(societyId: string, from: Date, to: Date) {
       { category: 1, status: 1, createdAt: 1, firstRespondedAt: 1, resolvedAt: 1, closedAt: 1,
         assigneeStaffId: 1, assigneeName: 1, assetId: 1, reopenCount: 1, rating: 1,
         firstResponseDueAt: 1, resolutionDueAt: 1 }).lean(),
-    SocietyStaff.find({ societyId: sid, isActive: true }, { 'person.name': 1, category: 1 }).lean(),
+    // `designation`, not `category` — SocietyStaff has no `category` path, so
+    // the old projection asked for a field that does not exist. Only the count
+    // was ever read, which is why nothing broke and nothing was noticed.
+    SocietyStaff.find({ societyId: sid, isActive: true }, { 'person.name': 1, designation: 1 }).lean(),
   ]);
 
   // ------------------------------------------------------------ gate figures
@@ -372,6 +376,21 @@ export async function opsReport(societyId: string, from: Date, to: Date) {
 
   const rated = complaints.filter(c => typeof c.rating === 'number');
 
+  /**
+   * The worst machines, by NAME.
+   *
+   * This used to return bare `assetId`s. "6a5e…f9b had 5 faults" is not a
+   * sentence anybody can read out at an AMC renewal, and no caller had any way
+   * to turn the id into a lift — which is very likely part of why this report
+   * never grew a screen at all.
+   */
+  const worstIds = [...byAsset.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const assetNames = worstIds.length
+    ? await Asset.find({ _id: { $in: worstIds.map(([id]) => oid(id)) }, societyId: sid },
+        { name: 1, blockName: 1, location: 1 }).lean()
+    : [];
+  const nameOf = new Map(assetNames.map(a => [String(a._id), a]));
+
   return {
     from, to,
     gate: {
@@ -404,8 +423,12 @@ export async function opsReport(societyId: string, from: Date, to: Date) {
       byStaff: [...byStaff.values()].sort((a, b) => b.assigned - a.assigned),
       // A single machine with five faults in a month is the sentence worth
       // reading out at the AMC renewal.
-      worstAssets: [...byAsset.entries()].map(([assetId, faults]) => ({ assetId, faults }))
-        .sort((a, b) => b.faults - a.faults).slice(0, 10),
+      worstAssets: worstIds.map(([assetId, faults]) => ({
+        assetId,
+        faults,
+        name: nameOf.get(assetId)?.name || 'Equipment no longer listed',
+        where: [nameOf.get(assetId)?.blockName, nameOf.get(assetId)?.location].filter(Boolean).join(' · ') || undefined,
+      })),
     },
     staffOnBooks: staff.length,
   };

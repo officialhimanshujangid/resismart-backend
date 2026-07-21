@@ -18,6 +18,8 @@ import { autoCloseStragglers, reconcileDay, purgeOldEntries } from './visitor.se
 import { purgeOld as purgeOldNotifications } from './notification.service';
 import { pruneStaleTokens } from './push.service';
 import { sweepExpired as sweepExpiredApprovals } from './gate-approval.service';
+import { sweepEscalations } from './complaint.service';
+import { sweepExpiringAmcs } from './asset.service';
 import { expireOld as expireOldPasses } from './gate-pass.service';
 import { expireOld as expireOldTransfers } from './admin-transfer.service';
 import { generateInvoicesForSociety } from './invoicing.service';
@@ -333,6 +335,51 @@ export function startCronJobs(): void {
       if (resolved) logger.info(`[cron] ${resolved} gate approvals timed out`);
     } catch (err: any) {
       logger.error(`[cron] Approval sweep failed: ${err.message}`);
+    }
+  });
+
+  /**
+   * Complaint escalation, hourly.
+   *
+   * `findEscalations` and `applyEscalation` shipped correct and were never
+   * called — no cron, no route — so `escalationLevel` never moved in
+   * production and the committee was never told an SLA had slipped. This is the
+   * caller that was missing. Hourly, because an SLA breached at 2:05 does not
+   * need to be shouted about at 2:06; the committee acts on the hour, not the
+   * minute.
+   */
+  cron.schedule('15 * * * *', async () => {
+    try {
+      const policies = await SocietyOpsPolicy.find({}).select('societyId').lean();
+      let total = 0;
+      for (const p of policies) {
+        try { total += await sweepEscalations(String(p.societyId)); }
+        catch (err: any) { logger.error(`[cron] Escalation failed for society ${p.societyId}: ${err.message}`); }
+      }
+      if (total) logger.info(`[cron] Escalated ${total} overdue complaint(s)`);
+    } catch (err: any) {
+      logger.error(`[cron] Escalation sweep failed: ${err.message}`);
+    }
+  });
+
+  /**
+   * AMC expiry warnings, daily.
+   *
+   * Same shape of gap: `findExpiringAmcs` existed only as a passive banner on
+   * the Equipment page — a manager had to already be looking. Now a contract
+   * running out actually pings the committee, once, thirty days ahead.
+   */
+  cron.schedule('20 4 * * *', async () => {
+    try {
+      const policies = await SocietyOpsPolicy.find({}).select('societyId').lean();
+      let total = 0;
+      for (const p of policies) {
+        try { total += await sweepExpiringAmcs(String(p.societyId)); }
+        catch (err: any) { logger.error(`[cron] AMC sweep failed for society ${p.societyId}: ${err.message}`); }
+      }
+      if (total) logger.info(`[cron] Warned about ${total} expiring AMC(s)`);
+    } catch (err: any) {
+      logger.error(`[cron] AMC sweep failed: ${err.message}`);
     }
   });
 

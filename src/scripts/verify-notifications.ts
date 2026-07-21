@@ -248,7 +248,7 @@ async function main() {
     }, { userId: String(tenantId), userName: 'Tenant Iyer' });
     ok('the complaint itself was recorded', !!complaint._id);
 
-    await markWorkDone(SID, String(complaint._id), 'Washer replaced', [], actor);
+    await markWorkDone(SID, String(complaint._id), "Washer replaced", [], actor, { canManage: true });
     await settle();
 
     const ownerNotes = await listForUser(SID, String(ownerId));
@@ -263,7 +263,7 @@ async function main() {
     ok('the person who reported the work done is not told about themselves',
       !managerNotes.items.some(i => i.kind === 'COMPLAINT_WORK_DONE'));
 
-    await close(SID, String(complaint._id), actor);
+    await close(SID, String(complaint._id), actor, { canManage: true });
     await settle();
     const afterClose = await listForUser(SID, String(ownerId));
     ok('closing tells the flat', afterClose.items.some(i => i.kind === 'COMPLAINT_CLOSED'));
@@ -282,7 +282,7 @@ async function main() {
     const orphan = await raise(OTHER, {
       title: 'Nobody lives here', category: 'Other', flatId: String(orphanFlat._id),
     }, actor);
-    await markWorkDone(OTHER, String(orphan._id), 'done', [], actor);
+    await markWorkDone(OTHER, String(orphan._id), "done", [], actor, { canManage: true });
     await settle();
     const stillThere = await Complaint.findById(orphan._id);
     eq('a complaint with nobody to notify still completes', stillThere?.status, 'WORK_DONE');

@@ -8,6 +8,7 @@ import { addMemberSchema, updateMemberSchema, addDocumentSchema } from '../valid
 import * as household from '../services/household.service';
 import { AuditService } from '../services/audit.service';
 import s3Service from '../services/s3.service';
+import { assertFlatAccess, assertResidentAccess, FlatAccessError } from '../services/flat-access.service';
 import { TenantType, UserRole } from '../constants/roles';
 
 /** Society admins/committee manage any flat; a flat owner manages only their own flat. */
@@ -61,6 +62,10 @@ export const getTenancy = async (req: Request, res: Response, next: NextFunction
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(401).json({ error: 'Missing tenant details' }); return; }
+    const access = await assertFlatAccess(societyId, req.params.flatId, {
+      userId: String(req.user!.userId), role: String(req.user!.activeRole || ''),
+    });
+
     const flatId = new mongoose.Types.ObjectId(req.params.flatId);
     const sId = new mongoose.Types.ObjectId(societyId);
 
@@ -72,9 +77,15 @@ export const getTenancy = async (req: Request, res: Response, next: NextFunction
     res.status(200).json({
       tenancy: {
         _id: tenure._id, party: tenure.party, startDate: tenure.startDate, endDate: tenure.endDate,
-        rentAmountPaise: tenure.rentAmountPaise, securityDepositPaise: tenure.securityDepositPaise,
+        // Money and the papers themselves are withheld from anyone who is not
+        // the committee, the owner, or the tenant living under this lease.
+        // The tenancy's existence and dates are not secret; its terms are.
+        rentAmountPaise: access.canSeeMoney ? tenure.rentAmountPaise : undefined,
+        securityDepositPaise: access.canSeeMoney ? tenure.securityDepositPaise : undefined,
         rentalAgreementId: tenure.rentalAgreementId,
-        documents: (tenure.documents || []).map((d: any) => ({ _id: d._id, kind: d.kind, label: d.label, uploadedAt: d.uploadedAt })),
+        documents: (access.canSeeTenantSide || access.isStaffSide)
+          ? (tenure.documents || []).map((d: any) => ({ _id: d._id, kind: d.kind, label: d.label, uploadedAt: d.uploadedAt }))
+          : [],
       },
       tenantMembers,
     });
@@ -108,6 +119,12 @@ export const downloadTenancyDocument = async (req: Request, res: Response, next:
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(401).json({ error: 'Missing tenant details' }); return; }
+    // Same hole as the household documents: a lease is the tenant's paper and
+    // the society's record — not something the whole building may read.
+    await assertFlatAccess(societyId, req.params.flatId, {
+      userId: String(req.user!.userId), role: String(req.user!.activeRole || ''),
+    }, 'TENANT_SIDE');
+
     const tenure: any = await FlatTenure.findOne({ flatId: req.params.flatId, societyId: new mongoose.Types.ObjectId(societyId), type: 'TENANCY' })
       .sort({ startDate: -1 }).lean();
     const doc = tenure && (tenure.documents || []).find((d: any) => d._id.toString() === req.params.docId);
@@ -223,8 +240,14 @@ export const downloadHouseholdDocument = async (req: Request, res: Response, nex
   try {
     const societyId = req.user?.activeTenantId;
     if (!societyId) { res.status(401).json({ error: 'Missing tenant details' }); return; }
-    const resident = await Resident.findOne({ _id: req.params.residentId, societyId: new mongoose.Types.ObjectId(societyId) }).lean();
-    if (!resident) { res.status(404).json({ error: 'Member not found' }); return; }
+    // The society check alone used to be the WHOLE check here, and it is a
+    // tenant boundary, not an authorisation one. Any member — including the
+    // gate guard — could walk flats → household → document id and pull every
+    // Aadhaar and PAN scan in the building.
+    const { resident } = await assertResidentAccess(societyId, req.params.residentId, {
+      userId: String(req.user!.userId), role: String(req.user!.activeRole || ''),
+    });
+
     const doc = (resident.documents || []).find((d: any) => d._id.toString() === req.params.docId);
     if (!doc) { res.status(404).json({ error: 'Document not found' }); return; }
     const url = await s3Service.getSignedDownloadUrl(doc.key, { downloadName: doc.label });

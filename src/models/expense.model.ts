@@ -25,6 +25,24 @@ export interface IExpenseLine {
    */
   staffId?: mongoose.Types.ObjectId;
   staffName?: string;
+
+  /**
+   * What this line was spent ON, in operations terms.
+   *
+   * The two questions a committee asks that nothing could answer: "what did
+   * that lift cost us this year" and "how much did fixing that complaint come
+   * to". Both were unanswerable because money and maintenance lived in two
+   * modules with no thread between them — the ledger knew ₹18,000 went to a
+   * vendor, the complaint knew a pump was repaired, and nothing joined them.
+   *
+   * Optional and purely descriptive: nothing in the posting logic reads these,
+   * so tagging a line wrongly costs a report its accuracy and never the books
+   * their balance.
+   */
+  complaintId?: mongoose.Types.ObjectId;
+  complaintCode?: string;
+  assetId?: mongoose.Types.ObjectId;
+  assetName?: string;
 }
 
 export interface IExpense extends Document {
@@ -72,6 +90,10 @@ const ExpenseLineSchema = new Schema<IExpenseLine>({
   blockName: { type: String, trim: true },
   staffId: { type: Schema.Types.ObjectId, ref: 'SocietyStaff' },
   staffName: { type: String, trim: true },
+  complaintId: { type: Schema.Types.ObjectId, ref: 'Complaint' },
+  complaintCode: { type: String, trim: true },
+  assetId: { type: Schema.Types.ObjectId, ref: 'Asset' },
+  assetName: { type: String, trim: true },
 }, { _id: false });
 
 const ExpenseSchema = new Schema<IExpense>({

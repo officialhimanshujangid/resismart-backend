@@ -29,6 +29,8 @@ export interface IAsset extends Document {
   vendorId?: mongoose.Types.ObjectId;
   vendorName?: string;
   amcExpiresOn?: Date;
+  /** The expiry we last warned the committee about, so the daily sweep warns once, not thirty times. */
+  amcWarnedForExpiry?: Date;
 
   /** Printed on the sticker. Random, not derived — a guessable one is a spam vector. */
   qrToken: string;
@@ -56,6 +58,7 @@ const AssetSchema = new Schema<IAsset>({
   vendorId: { type: Schema.Types.ObjectId, ref: 'Vendor' },
   vendorName: { type: String },
   amcExpiresOn: { type: Date },
+  amcWarnedForExpiry: { type: Date },
 
   qrToken: { type: String, required: true, default: () => crypto.randomBytes(12).toString('hex') },
   isActive: { type: Boolean, default: true },

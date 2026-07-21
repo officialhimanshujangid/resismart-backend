@@ -32,6 +32,22 @@ export type ApproverRule = 'ANY_ADULT' | 'HEAD_ONLY' | 'OWNER_ONLY';
 export const VISITOR_CATEGORIES = ['GUEST', 'DELIVERY', 'CAB', 'HOUSEHOLD_STAFF', 'CONTRACTOR', 'OTHER'] as const;
 export type VisitorCategory = typeof VISITOR_CATEGORIES[number];
 
+/**
+ * A resident's own movement, which is NOT a visitor category and is kept out
+ * of `VISITOR_CATEGORIES` on purpose.
+ *
+ * Everything that iterates the visitor categories — the approval rules a
+ * society sets per category, the expected-stay table, the "which categories do
+ * we record" list — would otherwise silently acquire a row for residents, and
+ * the first society to see "Approval required: RESIDENT" in their settings
+ * would reasonably conclude the software thinks residents need permission to
+ * enter their own home.
+ *
+ * It is recorded only when `gate.residents.logMovement` is switched on, and
+ * `createEntry` refuses it outright otherwise.
+ */
+export const RESIDENT_MOVEMENT = 'RESIDENT' as const;
+
 export interface IApprovalRule {
   mode: ApprovalMode;
   timeoutSeconds: number;
@@ -92,6 +108,13 @@ export interface ISocietyOpsPolicy extends Document {
 
     exit: {
       trackExit: boolean;
+      /**
+       * When the society actually answered "do you record people leaving?".
+       *
+       * `trackExit` defaults to true, so its value alone cannot tell an answer
+       * from a default — and the setup checklist needs exactly that difference.
+       */
+      answeredAt?: Date;
       mode: ExitMode;
       /** Minutes after the expected stay before the gate is told. */
       overstayAlertAfterMinutes: number;
@@ -173,6 +196,7 @@ const SocietyOpsPolicySchema = new Schema<ISocietyOpsPolicy>({
 
     exit: {
       trackExit: { type: Boolean, default: true },
+      answeredAt: { type: Date },
       mode: { type: String, enum: ['MANUAL', 'SCAN', 'AUTO_EXPIRE'], default: 'MANUAL' },
       overstayAlertAfterMinutes: { type: Number, default: 60, min: 5 },
       autoCloseAtHour: { type: Number, default: 23, min: 0, max: 23 },

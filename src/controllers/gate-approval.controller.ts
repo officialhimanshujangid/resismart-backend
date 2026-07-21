@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import * as approvals from '../services/gate-approval.service';
 import { ApprovalError } from '../services/gate-approval.service';
+import * as arrival from '../services/arrival.service';
 import { ResidentGatePreference } from '../models/resident-gate-preference.model';
 import { Resident } from '../models/resident.model';
 import { VISITOR_CATEGORIES } from '../models/society-ops-policy.model';
@@ -53,6 +54,13 @@ export const decide = async (req: Request, res: Response) => {
       societyId, req.params.id, req.body.allow === true, actorOf(req),
       { leaveAtGate: req.body.leaveAtGate === true },
     );
+    // Carry the decision onto the waiting entry, so "who is inside" reflects it.
+    // Without this the resident's answer changes the request and leaves the
+    // person stuck AWAITING forever — the join the whole module was missing.
+    await arrival.applyDecision(
+      societyId, String(request._id), request.outcome as any,
+      { name: request.decidedByName }, actorOf(req),
+    ).catch(e => logger.error(`Could not settle entry: ${e.message}`));
     auditFinance(req, 'GATE_APPROVAL_DECIDED', 'ApprovalRequest', String(request._id), {
       newValues: { outcome: request.outcome, visitor: request.visitorName },
     });
@@ -66,6 +74,10 @@ export const override = async (req: Request, res: Response) => {
     const request = await approvals.override(
       societyId, req.params.id, req.body.allow === true, req.body.reason, actorOf(req),
     );
+    await arrival.applyDecision(
+      societyId, String(request._id), request.outcome as any,
+      { name: request.decidedByName, reason: request.reason }, actorOf(req),
+    ).catch(e => logger.error(`Could not settle entry: ${e.message}`));
     // Audited separately from a resident decision, and deliberately so: an
     // override is the event a committee actually goes looking for.
     auditFinance(req, 'GATE_APPROVAL_OVERRIDE', 'ApprovalRequest', String(request._id), {

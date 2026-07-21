@@ -216,6 +216,11 @@ export async function updateOpsPolicy(
     set('gate.capture.idProof', body.gate?.capture?.idProof);
     set('gate.capture.categoriesEnabled', body.gate?.capture?.categoriesEnabled);
     set('gate.exit.trackExit', body.gate?.exit?.trackExit);
+    // "Do you record people leaving?" is the one question the whole gate module
+    // is shaped by, and `trackExit` defaulting to true made "never asked" and
+    // "said yes" indistinguishable. This stamp is what the setup checklist reads
+    // to know the society has actually answered rather than inherited a default.
+    if (body.gate?.exit?.trackExit !== undefined) set('gate.exit.answeredAt', new Date());
     set('gate.exit.mode', body.gate?.exit?.mode);
     set('gate.exit.overstayAlertAfterMinutes', body.gate?.exit?.overstayAlertAfterMinutes);
     set('gate.exit.autoCloseAtHour', body.gate?.exit?.autoCloseAtHour);

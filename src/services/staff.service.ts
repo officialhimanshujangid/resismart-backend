@@ -4,6 +4,9 @@ import { StaffAssignment, WORK_CATEGORIES } from '../models/staff-assignment.mod
 import { Vendor } from '../models/vendor.model';
 import { Block } from '../models/block.model';
 import { AccessRole } from '../models/access-role.model';
+import { User } from '../models/user.model';
+import { TenantType, UserRole } from '../constants/roles';
+import { attachTenantMembership, primaryIdentityId } from './identity.service';
 import { logger } from '../utils/logger.util';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
@@ -137,6 +140,49 @@ export async function updateStaff(societyId: string, id: string, body: any, acto
 }
 
 /**
+ * Give a staff member a login.
+ *
+ * This is the function whose absence made the whole permission system dead
+ * code. `SocietyStaff.userId` was declared and never written, so `resolveAccess`
+ * always found nobody, every SOCIETY_EMPLOYEE got all-NONE, and no assigned
+ * technician was ever notified. The model was right; there was simply no door
+ * from a staff record to a user account.
+ *
+ * Reuses `attachTenantMembership` — the exact machinery residents and shops are
+ * provisioned through — rather than inventing a second way to make a user. The
+ * generated password is returned so the office can hand it over; there is no
+ * SMS gateway yet, and inventing one here would be scope this phase does not own.
+ */
+export async function provisionLogin(societyId: string, id: string, actor: Actor): Promise<{ staff: ISocietyStaff; password?: string }> {
+  const staff = await SocietyStaff.findOne({ _id: id, societyId: oid(societyId) });
+  if (!staff) throw new StaffError('That staff member could not be found.', 404);
+  if (!staff.isActive) throw new StaffError('They have left — a former employee cannot be given a login.');
+  if (staff.userId) throw new StaffError('They already have a login.');
+  if (!staff.person.phone && !staff.person.email) {
+    throw new StaffError('Add a phone or email first — a login needs something to sign in with.');
+  }
+
+  const attached = await attachTenantMembership({
+    name: staff.person.name,
+    email: staff.person.email,
+    phone: staff.person.phone,
+    tenantType: TenantType.SOCIETY,
+    tenantId: societyId,
+    role: UserRole.SOCIETY_EMPLOYEE,
+  });
+
+  const userId = primaryIdentityId(attached);
+  if (!userId) throw new StaffError('Could not create a login for them.');
+
+  staff.userId = userId;
+  staff.updatedBy = oid(actor.userId); staff.updatedByName = actor.userName;
+  await staff.save();
+
+  logger.info(`Society ${societyId}: login provisioned for ${staff.person.name}`);
+  return { staff, password: attached.generatedPassword };
+}
+
+/**
  * End someone's employment.
  *
  * Deactivated, never deleted: their name is on months of complaint history and
@@ -158,6 +204,17 @@ export async function endEmployment(societyId: string, id: string, leftOn: Date,
     { societyId: oid(societyId), staffId: staff._id, isActive: true },
     { $set: { isActive: false, updatedBy: oid(actor.userId), updatedByName: actor.userName } },
   );
+
+  // Pull their society-employee membership, so a dismissed guard cannot still
+  // sign in. The identity row itself stays — they may be a resident elsewhere,
+  // and their name must keep resolving on old records.
+  if (staff.userId) {
+    await User.updateOne(
+      { _id: staff.userId },
+      { $pull: { memberships: { tenantId: oid(societyId), role: UserRole.SOCIETY_EMPLOYEE } } },
+    ).catch(e => logger.error(`Could not revoke login for departed staff: ${e.message}`));
+  }
+
   logger.info(`Society ${societyId}: ${staff.person.name} left; ${res.modifiedCount} assignment(s) ended with them`);
   return staff;
 }
@@ -271,6 +328,84 @@ export async function findAssignee(
     }
   }
   return null;
+}
+
+// ------------------------------------------------------------------ coverage
+
+export interface CoverageCell {
+  category: string;
+  scopeKey: string;              // a block id, or 'SOCIETY'
+  scopeLabel: string;
+  primary: { staffId: string; staffName: string }[];
+  backup: { staffId: string; staffName: string }[];
+}
+
+export interface CoverageMatrix {
+  categories: string[];
+  scopes: { key: string; label: string }[];
+  cells: CoverageCell[];
+  /** Category+wing pairs where a complaint would reach nobody. */
+  gaps: { category: string; scopeKey: string; scopeLabel: string }[];
+}
+
+/**
+ * Who covers what, laid out as a grid.
+ *
+ * `findAssignee` returns `null` when nothing matches and the caller parks the
+ * complaint unassigned — correct behaviour, and completely silent. A committee
+ * only discovers the hole when a lift complaint sits untouched for a week.
+ *
+ * This computes the same walk `findAssignee` does, for every category against
+ * every wing, and names the empty squares. It is the answer to "why did nobody
+ * get my complaint" before it is asked rather than after.
+ *
+ * Note the gap rule mirrors routing exactly: a wing is covered if it has its
+ * own primary or backup, OR if somebody covers the whole society. Diverging
+ * here would produce a grid that disagrees with what actually happens.
+ */
+export async function coverage(societyId: string): Promise<CoverageMatrix> {
+  const [assignments, blocks, activeStaff] = await Promise.all([
+    StaffAssignment.find({ societyId: oid(societyId), isActive: true }).lean(),
+    Block.find({ societyId: oid(societyId) }).select('name').sort({ name: 1 }).lean(),
+    SocietyStaff.find({ societyId: oid(societyId), isActive: true }).select('_id').lean(),
+  ]);
+
+  // An assignment can outlive the person. Routing skips those, so the grid must
+  // too, or it shows cover that does not exist.
+  const employed = new Set(activeStaff.map(s => String(s._id)));
+  const live = assignments.filter(a => employed.has(String(a.staffId)));
+
+  const scopes = [
+    { key: 'SOCIETY', label: 'Whole society' },
+    ...blocks.map(b => ({ key: String(b._id), label: b.name })),
+  ];
+
+  const cells: CoverageCell[] = [];
+  const gaps: CoverageMatrix['gaps'] = [];
+
+  for (const category of WORK_CATEGORIES) {
+    const forCategory = live.filter(a => a.categories.includes(category));
+    const societyWide = forCategory.filter(a => a.scope === 'SOCIETY');
+
+    for (const scope of scopes) {
+      const mine = scope.key === 'SOCIETY'
+        ? societyWide
+        : forCategory.filter(a => a.scope === 'BLOCK' && String(a.blockId) === scope.key);
+
+      const cell: CoverageCell = {
+        category, scopeKey: scope.key, scopeLabel: scope.label,
+        primary: mine.filter(a => a.rank === 'PRIMARY').map(a => ({ staffId: String(a.staffId), staffName: a.staffName })),
+        backup: mine.filter(a => a.rank === 'BACKUP').map(a => ({ staffId: String(a.staffId), staffName: a.staffName })),
+      };
+      cells.push(cell);
+
+      const covered = cell.primary.length + cell.backup.length > 0
+        || (scope.key !== 'SOCIETY' && societyWide.length > 0);
+      if (!covered) gaps.push({ category, scopeKey: scope.key, scopeLabel: scope.label });
+    }
+  }
+
+  return { categories: [...WORK_CATEGORIES], scopes, cells, gaps };
 }
 
 /**

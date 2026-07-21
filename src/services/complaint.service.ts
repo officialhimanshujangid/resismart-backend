@@ -1,11 +1,12 @@
 import mongoose from 'mongoose';
 import { Complaint, IComplaint, PAUSE_REASONS, PauseReason, ComplaintStatus } from '../models/complaint.model';
-import { ComplaintCategory } from '../models/complaint-category.model';
+import { ComplaintCategory, IComplaintCategory } from '../models/complaint-category.model';
 import { ComplaintEvent, ComplaintEventType } from '../models/complaint-event.model';
 import { Asset } from '../models/asset.model';
 import { Flat } from '../models/flat.model';
 import { SocietyStaff } from '../models/society-staff.model';
 import { findAssignee } from './staff.service';
+import { WORK_CATEGORIES } from '../models/staff-assignment.model';
 import { EffectiveAccess } from './access-role.service';
 import { notify } from './notification.service';
 import { usersOfFlat, userOfStaff, usersOfCommittee, excluding } from './notify-recipients';
@@ -87,6 +88,84 @@ export async function listCategories(societyId: string, userId: string, userName
   return ComplaintCategory.find({ societyId: oid(societyId), isActive: true })
     .sort({ sortOrder: 1, category: 1 }).lean();
 }
+
+/** Manage-side: every category including the switched-off ones. */
+export async function listAllCategories(societyId: string) {
+  return ComplaintCategory.find({ societyId: oid(societyId) })
+    .sort({ isActive: -1, sortOrder: 1, category: 1 }).lean();
+}
+
+export interface CategoryInput {
+  category: string;
+  subCategory?: string;
+  workCategory: string;
+  firstResponseMinutes?: number;
+  resolutionMinutes?: number;
+  isEmergency?: boolean;
+  isActive?: boolean;
+  sortOrder?: number;
+}
+
+/**
+ * Create or edit a complaint category.
+ *
+ * This exists because there was no way to. Every SLA field was writable on the
+ * model and had no writer — no service, no route, no screen — so a society was
+ * frozen with the thirteen seeded rows and their timings forever. A committee
+ * that wanted "garden complaints answered in a week, not a fortnight" had no
+ * lever to pull.
+ *
+ * `workCategory` is validated against the trades staff can actually be assigned
+ * to. A category routing to a trade no assignment uses is a category whose
+ * complaints always fall to "nobody" — accepting a free string would rebuild
+ * exactly that silent failure.
+ */
+export async function saveCategory(societyId: string, input: CategoryInput, actor: Actor, id?: string): Promise<IComplaintCategory> {
+  if (!input.category?.trim()) throw new ComplaintError('A category needs a name.');
+  if (!(WORK_CATEGORIES as readonly string[]).includes(input.workCategory)) {
+    throw new ComplaintError('That is not a trade staff can be assigned to.');
+  }
+  if (input.firstResponseMinutes && input.resolutionMinutes
+      && input.firstResponseMinutes > input.resolutionMinutes) {
+    throw new ComplaintError('The first-reply promise cannot be slower than the fix promise.');
+  }
+
+  const fields = {
+    category: input.category.trim(),
+    subCategory: input.subCategory?.trim() || undefined,
+    workCategory: input.workCategory,
+    firstResponseMinutes: input.firstResponseMinutes,
+    resolutionMinutes: input.resolutionMinutes,
+    isEmergency: input.isEmergency,
+    isActive: input.isActive,
+    sortOrder: input.sortOrder,
+    updatedBy: oid(actor.userId), updatedByName: actor.userName,
+  };
+
+  try {
+    if (id) {
+      const cat = await ComplaintCategory.findOneAndUpdate(
+        { _id: oid(id), societyId: oid(societyId) },
+        { $set: clean(fields) },
+        { new: true },
+      );
+      if (!cat) throw new ComplaintError('That category could not be found.', 404);
+      return cat;
+    }
+    return await ComplaintCategory.create({
+      societyId: oid(societyId), ...clean(fields),
+      createdBy: oid(actor.userId), createdByName: actor.userName,
+    });
+  } catch (e: any) {
+    // The unique (society, category, subCategory) index.
+    if (e?.code === 11000) throw new ComplaintError('A category with that name already exists.');
+    throw e;
+  }
+}
+
+/** Drop undefined keys so a partial edit does not overwrite fields with null. */
+const clean = (o: Record<string, any>) =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
 async function nextTicketCode(societyId: string): Promise<string> {
   const count = await Complaint.countDocuments({ societyId: oid(societyId) });
@@ -252,7 +331,11 @@ export async function assignTo(
   } else {
     c.assigneeStaffId = undefined;
     c.assigneeName = undefined;
-    c.status = 'NEW';
+    // Only rewind to NEW from ASSIGNED. Unassigning an IN_PROGRESS or WORK_DONE
+    // ticket used to silently reset it to NEW, erasing that work had begun —
+    // exactly the ADDA failure this module's header claims to avoid. Work that
+    // has started stays in its state; it just no longer has a name on it.
+    if (c.status === 'ASSIGNED') c.status = 'NEW';
   }
   c.updatedBy = oid(actor.userId); c.updatedByName = actor.userName;
   await c.save();
@@ -281,12 +364,60 @@ async function mine(societyId: string, id: string): Promise<IComplaint> {
 }
 
 /**
+ * The same lookup, but only if this caller is entitled to act on it.
+ *
+ * `mine()` above checks the SOCIETY and nothing else — which is a tenant
+ * boundary, not an authorisation check. Every resident-facing action was built
+ * on it, so any resident who could see a community complaint's id could
+ * resolve, reopen or rate a complaint belonging to another flat. Marking a
+ * neighbour's open complaint RESOLVED stops its SLA clock and suppresses its
+ * escalation, which is a silent and quite effective way to bury somebody
+ * else's problem.
+ *
+ * The entitlement is deliberately the same shape as the read scoping in
+ * `list`/`detail`, so a person can only ever act on what they can already see.
+ */
+async function actable(societyId: string, id: string, opts: ListOpts): Promise<IComplaint> {
+  const c = await mine(societyId, id);
+
+  // Managers act on anything in their society; the wing scope still applies.
+  if (opts.canManage) {
+    if (opts.blockIds && c.blockId && !opts.blockIds.some(b => String(b) === String(c.blockId))) {
+      throw new ComplaintError('That complaint belongs to another wing.', 403);
+    }
+    return c;
+  }
+
+  // The person doing the work, on their own queue.
+  if (opts.ownStaffId && String(c.assigneeStaffId || '') === String(opts.ownStaffId)) return c;
+
+  // A resident: their own flat, or one they raised themselves.
+  if (opts.residentFlatIds) {
+    const ownFlat = c.flatId && opts.residentFlatIds.some(f => String(f) === String(c.flatId));
+    const raisedIt = opts.userId && String(c.raisedByUserId || '') === String(opts.userId);
+    if (ownFlat || raisedIt) return c;
+  }
+
+  // 404 rather than 403 — the same reasoning as `detail`: confirming that an
+  // id exists is itself a small leak.
+  throw new ComplaintError('That complaint could not be found.', 404);
+}
+
+/** Anyone who can SEE it may add their voice — that is what "me too" is for. */
+async function joinable(societyId: string, id: string, opts: ListOpts): Promise<IComplaint> {
+  const c = await mine(societyId, id);
+  if (opts.canManage) return c;
+  if (c.visibility === 'COMMUNITY' && c.kind !== 'CONDUCT') return c;
+  return actable(societyId, id, opts);
+}
+
+/**
  * First reply. Recorded separately from resolution because silence is what
  * residents actually complain about — an answered-but-unfixed problem reads
  * completely differently from an ignored one.
  */
-export async function respond(societyId: string, id: string, note: string, actor: Actor): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+export async function respond(societyId: string, id: string, note: string, actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
+  const c = await actable(societyId, id, opts);
   if (!c.firstRespondedAt) c.firstRespondedAt = new Date();
   if (c.status === 'NEW' || c.status === 'ASSIGNED') c.status = 'IN_PROGRESS';
   c.updatedBy = oid(actor.userId); c.updatedByName = actor.userName;
@@ -321,7 +452,7 @@ async function tellTheFlat(
   });
 }
 
-export async function pause(societyId: string, id: string, reason: PauseReason, actor: Actor): Promise<IComplaint> {
+export async function pause(societyId: string, id: string, reason: PauseReason, actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
   if (!(PAUSE_REASONS as readonly string[]).includes(reason)) {
     // A free-text reason would make every ticket pausable for anything, and the
     // pause would stop meaning something anybody could count.
@@ -340,8 +471,8 @@ export async function pause(societyId: string, id: string, reason: PauseReason, 
   return c;
 }
 
-export async function resume(societyId: string, id: string, actor: Actor): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+export async function resume(societyId: string, id: string, actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
+  const c = await actable(societyId, id, opts);
   if (!c.pausedAt) throw new ComplaintError('This is not on hold.');
 
   const paused = Date.now() - c.pausedAt.getTime();
@@ -366,8 +497,8 @@ export async function resume(societyId: string, id: string, actor: Actor): Promi
  * every one of them built a confirmation step, which is strong evidence that
  * premature closure was a real and recurring problem.
  */
-export async function markWorkDone(societyId: string, id: string, note: string, photoKeys: string[], actor: Actor): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+export async function markWorkDone(societyId: string, id: string, note: string, photoKeys: string[], actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
+  const c = await actable(societyId, id, opts);
   if (['RESOLVED', 'CLOSED', 'REJECTED'].includes(c.status)) throw new ComplaintError('This is already finished.');
   if (c.pausedAt) throw new ComplaintError('This is on hold — take it off hold first.');
 
@@ -384,9 +515,16 @@ export async function markWorkDone(societyId: string, id: string, note: string, 
 }
 
 /** The resident, or a manager on their behalf, confirms it is actually fixed. */
-export async function resolve(societyId: string, id: string, actor: Actor): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+export async function resolve(societyId: string, id: string, actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
+  const c = await actable(societyId, id, opts);
   if (c.status === 'CLOSED') throw new ComplaintError('This is already closed.');
+  // A complaint nobody has touched cannot be "resolved". The WORK_DONE step
+  // exists precisely so the person who did the work does not also declare it
+  // fixed — jumping NEW → RESOLVED skipped that and let a brand-new ticket
+  // count as solved in the stats.
+  if (c.status === 'NEW') {
+    throw new ComplaintError('Nobody has worked on this yet — it cannot be marked resolved.');
+  }
   c.status = 'RESOLVED';
   c.resolvedAt = new Date();
   c.updatedBy = oid(actor.userId); c.updatedByName = actor.userName;
@@ -395,11 +533,15 @@ export async function resolve(societyId: string, id: string, actor: Actor): Prom
   return c;
 }
 
-export async function close(societyId: string, id: string, actor: Actor): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+export async function close(societyId: string, id: string, actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
+  const c = await actable(societyId, id, opts);
+  if (c.status === 'CLOSED') throw new ComplaintError('This is already closed.');
   c.status = 'CLOSED';
   c.closedAt = new Date();
-  if (!c.resolvedAt) c.resolvedAt = c.closedAt;
+  // NO backfill of resolvedAt. Setting it to closedAt when missing meant a
+  // complaint closed straight from NEW entered the median-resolution stat as
+  // though it had been worked — flattering the number the committee reads. A
+  // complaint closed without being resolved simply has no resolution time.
   c.updatedBy = oid(actor.userId); c.updatedByName = actor.userName;
   await c.save();
   await log(societyId, c._id, 'CLOSED', actor);
@@ -417,9 +559,9 @@ export interface ReopenPolicy { windowDays?: number }
  * "new" instead of counting throws that signal away entirely.
  */
 export async function reopen(
-  societyId: string, id: string, reason: string, actor: Actor, policy: ReopenPolicy = {},
+  societyId: string, id: string, reason: string, actor: Actor, opts: ListOpts = {}, policy: ReopenPolicy = {},
 ): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+  const c = await actable(societyId, id, opts);
   if (!['WORK_DONE', 'RESOLVED', 'CLOSED'].includes(c.status)) {
     throw new ComplaintError('This is still open — there is nothing to reopen.');
   }
@@ -449,8 +591,8 @@ export async function reopen(
  * feel like nags for chasing — joining a complaint is socially easy in a way
  * that filing a second one is not.
  */
-export async function meToo(societyId: string, id: string, actor: Actor): Promise<IComplaint> {
-  const c = await mine(societyId, id);
+export async function meToo(societyId: string, id: string, actor: Actor, opts: ListOpts = {}): Promise<IComplaint> {
+  const c = await joinable(societyId, id, opts);
   if (c.visibility !== 'COMMUNITY') throw new ComplaintError('You can only join a community complaint.');
   const uid = oid(actor.userId);
   if (c.meTooUserIds.some(u => String(u) === String(uid))) return c;
@@ -461,8 +603,8 @@ export async function meToo(societyId: string, id: string, actor: Actor): Promis
   return c;
 }
 
-export async function rate(societyId: string, id: string, rating: number, feedback: string | undefined, actor: Actor) {
-  const c = await mine(societyId, id);
+export async function rate(societyId: string, id: string, rating: number, feedback: string | undefined, actor: Actor, opts: ListOpts = {}) {
+  const c = await actable(societyId, id, opts);
   if (!['RESOLVED', 'CLOSED'].includes(c.status)) throw new ComplaintError('Rate it once it is finished.');
   c.rating = Math.max(1, Math.min(5, Math.round(rating)));
   c.feedback = feedback;
@@ -482,6 +624,12 @@ export interface ListOpts {
   canSeeConduct?: boolean;
   /** Their own userId, so a conduct complaint about them is hidden even so. */
   viewerStaffId?: string;
+  /** The caller. Used to let somebody act on a complaint they raised themselves. */
+  userId?: string;
+  /** Whether this reader may act on anything in the society (COMPLAINTS_MANAGE). */
+  canManage?: boolean;
+  /** Wing scope, when the caller is limited to some blocks. */
+  blockIds?: string[];
 }
 
 export async function list(societyId: string, query: any, opts: ListOpts = {}) {
@@ -572,12 +720,22 @@ export const ESCALATION_LADDER: EscalationStep[] = [
 ];
 
 /** Overdue complaints that have not yet been pushed to the next rung. */
+/** Once a complaint has climbed a rung, it does not climb again for this long. */
+const ESCALATION_COOLDOWN_MS = 60 * 60_000;
+
 export async function findEscalations(societyId: string, at = new Date()) {
   const rows = await Complaint.find({
     societyId: oid(societyId),
     status: { $nin: ['RESOLVED', 'CLOSED', 'REJECTED', 'ON_HOLD'] },
     resolutionDueAt: { $lt: at },
-  }).select('ticketCode title category blockName escalationLevel resolutionDueAt priority createdAt').lean();
+    // Do not re-escalate something escalated within the last hour. Without this
+    // the hourly sweep marches a badly-overdue complaint 1→2→3→4 in three
+    // hours and buries the committee under repeats of the same ticket.
+    $or: [
+      { lastEscalatedAt: { $exists: false } },
+      { lastEscalatedAt: { $lt: new Date(at.getTime() - ESCALATION_COOLDOWN_MS) } },
+    ],
+  }).select('ticketCode title category blockName escalationLevel resolutionDueAt priority createdAt lastEscalatedAt').lean();
 
   return rows.map(r => {
     const overdueMinutes = Math.floor((at.getTime() - r.resolutionDueAt!.getTime()) / 60_000);
@@ -590,6 +748,36 @@ export async function findEscalations(societyId: string, at = new Date()) {
     return { ...r, overdueMinutes, suggestedLevel: Math.max(target, r.escalationLevel + 1) };
   }).filter(r => r.suggestedLevel > r.escalationLevel && r.suggestedLevel <= 4);
 }
+
+/**
+ * Escalate everything that is overdue, across every society.
+ *
+ * `findEscalations` and `applyEscalation` were both correct and both dead —
+ * `applyEscalation`'s only caller in the whole repo was a verify script, and no
+ * cron ever ran the sweep. So `escalationLevel` never left 0 in production and
+ * the committee was never told about an overdue complaint. This is the missing
+ * caller.
+ *
+ * A system actor stands in for "the software decided", the same shape the gate
+ * timeout sweep already uses.
+ */
+export async function sweepEscalations(societyId: string, at = new Date()): Promise<number> {
+  const due = await findEscalations(societyId, at);
+  const actor: Actor = { userId: SYSTEM_ACTOR_ID, userName: 'System' };
+  let escalated = 0;
+  for (const row of due) {
+    try {
+      await applyEscalation(societyId, String(row._id), row.suggestedLevel, actor);
+      escalated++;
+    } catch (e: any) {
+      logger.error(`Could not escalate ${row.ticketCode}: ${e.message}`);
+    }
+  }
+  return escalated;
+}
+
+/** A stable id for actions the software itself takes. */
+const SYSTEM_ACTOR_ID = '000000000000000000000000';
 
 export async function applyEscalation(societyId: string, id: string, level: number, actor: Actor) {
   const c = await mine(societyId, id);

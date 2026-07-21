@@ -258,9 +258,9 @@ async function main() {
     // ================================================================ report
     console.log('\nThe report');
     const c1 = await raise(SID, { title: 'Lift stuck', category: 'Lift', flatId: String(flat._id) }, guard);
-    await respond(SID, String(c1._id), 'Technician on the way', guard);
-    await markWorkDone(SID, String(c1._id), 'Fixed', [], guard);
-    await resolve(SID, String(c1._id), guard);
+    await respond(SID, String(c1._id), "Technician on the way", guard, { canManage: true });
+    await markWorkDone(SID, String(c1._id), "Fixed", [], guard, { canManage: true });
+    await resolve(SID, String(c1._id), guard, { canManage: true });
     await raise(SID, { title: 'Tap leaking', category: 'Plumbing', flatId: String(flat._id) }, guard);
 
     const report = await opsReport(SID, new Date(Date.now() - 86_400_000), new Date(Date.now() + 86_400_000));

@@ -69,6 +69,15 @@ async function readerOpts(req: Request): Promise<complaints.ListOpts> {
     ownStaffId,
     viewerStaffId,
     canSeeConduct: access ? allows(access, 'COMPLAINTS_CONDUCT', 'READ') : false,
+    // The three below turn this from a READ scope into an ACT scope. The same
+    // object now answers both "what may I see?" and "what may I touch?", so
+    // the two can never drift apart — which is exactly how a resident came to
+    // be able to resolve a neighbour's complaint.
+    userId: String(req.user!.userId),
+    canManage: access ? allows(access, 'COMPLAINTS_MANAGE', 'FULL') : false,
+    blockIds: access && !access.isAdmin && access.scope && !access.scope.allBlocks
+      ? access.scope.blockIds
+      : undefined,
   };
 }
 
@@ -129,14 +138,22 @@ export const options = async (req: Request, res: Response) => {
   } catch (e: any) { fail(res, e, 'load the form'); }
 };
 
+/**
+ * Every action on one complaint goes through here, and every one of them now
+ * receives the caller's scope.
+ *
+ * That scope is resolved ONCE, in `readerOpts`, and handed down — rather than
+ * each action deciding for itself who is allowed to touch what. Eleven actions
+ * deciding separately is how four of them ended up checking only the society.
+ */
 const act = (
-  fn: (societyId: string, id: string, req: Request) => Promise<any>,
+  fn: (societyId: string, id: string, req: Request, opts: complaints.ListOpts) => Promise<any>,
   auditAction: string,
   what: string,
 ) => async (req: Request, res: Response) => {
   try {
     const societyId = String(req.user!.activeTenantId);
-    const c = await fn(societyId, req.params.id, req);
+    const c = await fn(societyId, req.params.id, req, await readerOpts(req));
     auditFinance(req, auditAction, 'Complaint', String(c._id));
     res.json({ success: true, data: c });
   } catch (e: any) { fail(res, e, what); }
@@ -147,39 +164,39 @@ export const assign = act(
   'COMPLAINT_ASSIGN', 'assign that complaint');
 
 export const respond = act(
-  (s, id, req) => complaints.respond(s, id, req.body.note, actorOf(req)),
+  (s, id, req, o) => complaints.respond(s, id, req.body.note, actorOf(req), o),
   'COMPLAINT_RESPOND', 'record that reply');
 
 export const pause = act(
-  (s, id, req) => complaints.pause(s, id, req.body.reason, actorOf(req)),
+  (s, id, req, o) => complaints.pause(s, id, req.body.reason, actorOf(req), o),
   'COMPLAINT_PAUSE', 'put that on hold');
 
 export const resume = act(
-  (s, id, req) => complaints.resume(s, id, actorOf(req)),
+  (s, id, req, o) => complaints.resume(s, id, actorOf(req), o),
   'COMPLAINT_RESUME', 'take that off hold');
 
 export const workDone = act(
-  (s, id, req) => complaints.markWorkDone(s, id, req.body.note, req.body.photoKeys || [], actorOf(req)),
+  (s, id, req, o) => complaints.markWorkDone(s, id, req.body.note, req.body.photoKeys || [], actorOf(req), o),
   'COMPLAINT_WORK_DONE', 'mark that as done');
 
 export const resolve = act(
-  (s, id, req) => complaints.resolve(s, id, actorOf(req)),
+  (s, id, req, o) => complaints.resolve(s, id, actorOf(req), o),
   'COMPLAINT_RESOLVE', 'confirm that');
 
 export const close = act(
-  (s, id, req) => complaints.close(s, id, actorOf(req)),
+  (s, id, req, o) => complaints.close(s, id, actorOf(req), o),
   'COMPLAINT_CLOSE', 'close that');
 
 export const reopen = act(
-  (s, id, req) => complaints.reopen(s, id, req.body.reason, actorOf(req)),
+  (s, id, req, o) => complaints.reopen(s, id, req.body.reason, actorOf(req), o),
   'COMPLAINT_REOPEN', 'reopen that');
 
 export const meToo = act(
-  (s, id, req) => complaints.meToo(s, id, actorOf(req)),
+  (s, id, req, o) => complaints.meToo(s, id, actorOf(req), o),
   'COMPLAINT_ME_TOO', 'join that complaint');
 
 export const rate = act(
-  (s, id, req) => complaints.rate(s, id, Number(req.body.rating), req.body.feedback, actorOf(req)),
+  (s, id, req, o) => complaints.rate(s, id, Number(req.body.rating), req.body.feedback, actorOf(req), o),
   'COMPLAINT_RATE', 'record that rating');
 
 export const escalations = async (req: Request, res: Response) => {
@@ -187,6 +204,30 @@ export const escalations = async (req: Request, res: Response) => {
     const data = await complaints.findEscalations(String(req.user!.activeTenantId));
     res.json({ success: true, data });
   } catch (e: any) { fail(res, e, 'load escalations'); }
+};
+
+/** Manually escalate one complaint — a manager pushing it up before the sweep would. */
+export const escalate = act(
+  (s, id, req) => complaints.applyEscalation(s, id, Number(req.body.level), actorOf(req)),
+  'COMPLAINT_ESCALATE', 'escalate that complaint');
+
+// ------------------------------------------------------------- categories
+
+export const listCategories = async (req: Request, res: Response) => {
+  try {
+    const data = await complaints.listAllCategories(String(req.user!.activeTenantId));
+    res.json({ success: true, data });
+  } catch (e: any) { fail(res, e, 'load categories'); }
+};
+
+export const saveCategory = async (req: Request, res: Response) => {
+  try {
+    const societyId = String(req.user!.activeTenantId);
+    const cat = await complaints.saveCategory(societyId, req.body, actorOf(req), req.params.id);
+    auditFinance(req, req.params.id ? 'COMPLAINT_CATEGORY_UPDATE' : 'COMPLAINT_CATEGORY_CREATE',
+      'ComplaintCategory', String(cat._id), { newValues: { category: cat.category, sla: cat.resolutionMinutes } });
+    res.json({ success: true, data: cat, message: 'Saved' });
+  } catch (e: any) { fail(res, e, 'save that category'); }
 };
 
 // -------------------------------------------------------------------- assets

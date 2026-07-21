@@ -29,6 +29,12 @@ router.get('/', authorizeRoles(EVERYONE), attachAccess, controller.list);
 router.get('/options', authorizeRoles(EVERYONE), attachAccess, controller.options);
 router.get('/escalations', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'READ'), controller.escalations);
 
+// Managing the categories a society complains about, and their SLAs. Declared
+// before /:id so "categories" is never read as an id.
+router.get('/categories', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'READ'), controller.listCategories);
+router.post('/categories', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'FULL'), controller.saveCategory);
+router.put('/categories/:id', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'FULL'), controller.saveCategory);
+
 // Assets. Declared before /:id so "assets" is never read as an id.
 router.get('/assets', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'READ'), controller.listAssets);
 router.post('/assets', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'FULL'), validate(createAssetSchema), controller.createAsset);
@@ -61,5 +67,6 @@ router.post('/:id/work-done', authorizeRoles(STAFF_SIDE), requirePermission('COM
 // Managing it. Assigning and closing need the wider permission.
 router.post('/:id/assign', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'FULL'), validate(assignComplaintSchema), controller.assign);
 router.post('/:id/close', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'FULL'), controller.close);
+router.post('/:id/escalate', authorizeRoles(STAFF_SIDE), requirePermission('COMPLAINTS_MANAGE', 'FULL'), controller.escalate);
 
 export default router;

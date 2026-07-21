@@ -739,7 +739,15 @@ export const getFlatFormLookup = async (req: Request, res: Response, next: NextF
       Block.find({ societyId }).sort({ name: 1 }).lean(),
       FlatSize.find({ societyId }).sort({ name: 1 }).lean(),
       Society.findById(societyId).lean(),
-      flatId ? Flat.findById(flatId).populate('ownerUserId', 'name email phone').populate('blockId').populate('size').lean() : Promise.resolve(null)
+      // `findOne({_id, societyId})`, never `findById`. This was the one genuine
+      // cross-tenant read in the codebase: an admin of society A could pass a
+      // flat id from society B and receive that flat plus its owner's name,
+      // email and phone. Every other query on this line was already scoped;
+      // this one was not, and nothing made the difference visible.
+      flatId
+        ? Flat.findOne({ _id: flatId, societyId })
+            .populate('ownerUserId', 'name email phone').populate('blockId').populate('size').lean()
+        : Promise.resolve(null)
     ]);
 
     res.status(200).json({ blocks, flatSizes, society, flat });
