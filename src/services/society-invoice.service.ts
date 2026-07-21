@@ -1,7 +1,8 @@
 import PDFDocument from 'pdfkit';
-import { IMaintenanceInvoice } from '../models/maintenance-invoice.model';
+import { IMaintenanceInvoice, IInvoiceLineItem } from '../models/maintenance-invoice.model';
 import { appConfig } from '../config/appConfig';
 import { formatMoney } from '../utils/currency.util';
+import { registerPdfFonts, PDF_FONT, PDF_FONT_BOLD } from '../utils/pdf-font.util';
 import s3Service from './s3.service';
 
 const BLUE = '#0a5bd7';
@@ -14,11 +15,39 @@ const SOFT = '#f8fafc';
 const money = (paise: number) => formatMoney(paise, 'INR');
 const fmtDate = (d?: Date) => (d ? new Date(d).toLocaleDateString('en-GB', { year: 'numeric', month: 'short', day: 'numeric' }) : '-');
 
+/**
+ * The working behind a line, when there is any: "2 × ₹500.00".
+ *
+ * A count-times-rate charge is the one a resident actually queries — a parking
+ * line that says only "Parking ₹1,000" gives them nothing to check, and the
+ * question ("why is it higher than last month?") is answered by the second bay
+ * appearing in the count. The generator fills `quantity`/`ratePaise` in for
+ * METERED and PER_QUANTITY; anything else has no working to show and returns ''.
+ */
+const workingOf = (li: IInvoiceLineItem): string => {
+  if (!li.quantity || li.ratePaise == null) return '';
+  const unit = li.pricingMode === 'METERED' ? ' units' : '';
+  return `${li.quantity}${unit} × ${money(li.ratePaise)}`;
+};
+
+/**
+ * The line-item table's columns, at 9.5pt.
+ *
+ * Exported so the layout can be asserted rather than eyeballed: pdfkit does not
+ * wrap a figure with no spaces in it, so an amount too wide for its column is
+ * not clipped and does not break — it silently overruns into the next one, and
+ * '₹1,00,000.00₹18,000.00' is what the resident is left reading. The widths are
+ * sized for a lakh, and verify-pdf-rupee.ts holds them to it (the embedded
+ * DejaVu is about a sixth wider than the Helvetica this used to be drawn in).
+ */
+export const INVOICE_COLUMNS = { NAME_W: 242, BASE_X: 310, BASE_W: 76, GST_X: 392, GST_W: 64, FONT_SIZE: 9.5 };
+
 /** Render a maintenance invoice to a PDF buffer. */
 export function buildInvoicePdf(invoice: IMaintenanceInvoice, societyName: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: 'A4', margin: 0 });
+      registerPdfFonts(doc);
       const chunks: Buffer[] = [];
       doc.on('data', (c: Buffer) => chunks.push(c));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -28,42 +57,47 @@ export function buildInvoicePdf(invoice: IMaintenanceInvoice, societyName: strin
 
       // Header
       doc.rect(0, 0, 595, 120).fill(BLUE);
-      doc.fillColor('#fff').font('Helvetica-Bold').fontSize(20).text(societyName || 'Society', M, 38, { width: 340 });
-      doc.font('Helvetica').fontSize(9).fillColor('#dbeafe').text('Maintenance Invoice', M, 66);
-      doc.font('Helvetica-Bold').fontSize(20).fillColor('#fff').text('INVOICE', M, 38, { width: right - M, align: 'right' });
-      doc.font('Helvetica').fontSize(9).fillColor('#dbeafe')
+      doc.fillColor('#fff').font(PDF_FONT_BOLD).fontSize(20).text(societyName || 'Society', M, 38, { width: 340 });
+      doc.font(PDF_FONT).fontSize(9).fillColor('#dbeafe').text('Maintenance Invoice', M, 66);
+      doc.font(PDF_FONT_BOLD).fontSize(20).fillColor('#fff').text('INVOICE', M, 38, { width: right - M, align: 'right' });
+      doc.font(PDF_FONT).fontSize(9).fillColor('#dbeafe')
         .text(`No. ${invoice.invoiceNumber}`, M, 66, { width: right - M, align: 'right' })
         .text(`Date: ${fmtDate(invoice.invoiceDate)}`, M, 80, { width: right - M, align: 'right' });
 
       // Billed-to
       let y = 150;
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(LIGHT).text('BILLED TO', M, y);
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(DARK).text(invoice.primaryOwnerName || `Flat ${invoice.flatNumber}`, M, y + 14);
-      doc.font('Helvetica').fontSize(9).fillColor(GREY)
+      doc.font(PDF_FONT_BOLD).fontSize(9).fillColor(LIGHT).text('BILLED TO', M, y);
+      doc.font(PDF_FONT_BOLD).fontSize(12).fillColor(DARK).text(invoice.primaryOwnerName || `Flat ${invoice.flatNumber}`, M, y + 14);
+      doc.font(PDF_FONT).fontSize(9).fillColor(GREY)
         .text(`Flat ${invoice.flatNumber}, ${invoice.blockName}${invoice.flatSizeLabel ? ` · ${invoice.flatSizeLabel}` : ''}`, M, y + 31);
 
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(LIGHT).text('PERIOD', 340, y, { width: right - 340, align: 'right' });
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(DARK).text(invoice.billingPeriod, 340, y + 14, { width: right - 340, align: 'right' });
-      doc.font('Helvetica').fontSize(9).fillColor(GREY).text(`Due: ${fmtDate(invoice.dueDate)}`, 340, y + 31, { width: right - 340, align: 'right' });
+      doc.font(PDF_FONT_BOLD).fontSize(9).fillColor(LIGHT).text('PERIOD', 340, y, { width: right - 340, align: 'right' });
+      doc.font(PDF_FONT_BOLD).fontSize(12).fillColor(DARK).text(invoice.billingPeriod, 340, y + 14, { width: right - 340, align: 'right' });
+      doc.font(PDF_FONT).fontSize(9).fillColor(GREY).text(`Due: ${fmtDate(invoice.dueDate)}`, 340, y + 31, { width: right - 340, align: 'right' });
 
       // Line items table
+      const { NAME_W, BASE_X, BASE_W, GST_X, GST_W, FONT_SIZE } = INVOICE_COLUMNS;
       y = 210;
       doc.rect(M, y, right - M, 24).fill(SOFT);
-      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(GREY);
+      doc.font(PDF_FONT_BOLD).fontSize(8.5).fillColor(GREY);
       doc.text('CHARGE', M + 12, y + 8);
-      doc.text('BASE', 330, y + 8, { width: 60, align: 'right' });
-      doc.text('GST', 400, y + 8, { width: 55, align: 'right' });
+      doc.text('BASE', BASE_X, y + 8, { width: BASE_W, align: 'right' });
+      doc.text('GST', GST_X, y + 8, { width: GST_W, align: 'right' });
       doc.text('AMOUNT', M, y + 8, { width: right - M - 12, align: 'right' });
       y += 24;
 
-      doc.font('Helvetica').fontSize(9.5);
       for (const li of invoice.lineItems) {
         if (li.category === 'ARREARS_BF') continue; // shown in totals section
-        doc.fillColor(DARK).text(li.name, M + 12, y + 7, { width: 260 });
-        doc.fillColor(GREY).text(money(li.baseAmountPaise), 330, y + 7, { width: 60, align: 'right' });
-        doc.text(li.gstPaise ? money(li.gstPaise) : '-', 400, y + 7, { width: 55, align: 'right' });
+        const working = workingOf(li);
+        doc.font(PDF_FONT).fontSize(FONT_SIZE);
+        doc.fillColor(DARK).text(li.name, M + 12, y + 7, { width: NAME_W });
+        doc.fillColor(GREY).text(money(li.baseAmountPaise), BASE_X, y + 7, { width: BASE_W, align: 'right' });
+        doc.text(li.gstPaise ? money(li.gstPaise) : '-', GST_X, y + 7, { width: GST_W, align: 'right' });
         doc.fillColor(DARK).text(money(li.lineTotalPaise), M, y + 7, { width: right - M - 12, align: 'right' });
-        y += 22;
+        // The count × rate, under the charge name — a taller row, but only for
+        // the lines that have something to show.
+        if (working) doc.font(PDF_FONT).fontSize(8).fillColor(LIGHT).text(working, M + 12, y + 19, { width: NAME_W });
+        y += working ? 32 : 22;
         if (y > 680) { doc.addPage(); y = 60; }
       }
       doc.moveTo(M, y + 2).lineTo(right, y + 2).strokeColor(LINE).stroke();
@@ -73,8 +107,8 @@ export function buildInvoicePdf(invoice: IMaintenanceInvoice, societyName: strin
       const labelX = 330;
       const valOpts = { width: right - M - 12, align: 'right' as const };
       const totalRow = (label: string, val: string, bold = false, color = DARK) => {
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 11 : 10).fillColor(bold ? color : GREY).text(label, labelX, ty);
-        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(bold ? color : DARK).text(val, M, ty, valOpts);
+        doc.font(bold ? PDF_FONT_BOLD : PDF_FONT).fontSize(bold ? 11 : 10).fillColor(bold ? color : GREY).text(label, labelX, ty);
+        doc.font(bold ? PDF_FONT_BOLD : PDF_FONT).fillColor(bold ? color : DARK).text(val, M, ty, valOpts);
         ty += bold ? 22 : 17;
       };
       totalRow('Current charges', money(invoice.subTotalPaise));
@@ -86,11 +120,11 @@ export function buildInvoicePdf(invoice: IMaintenanceInvoice, societyName: strin
       doc.moveTo(labelX, ty + 2).lineTo(right, ty + 2).strokeColor(LINE).stroke();
       ty += 12;
       doc.roundedRect(labelX, ty, right - labelX, 34, 8).fill(SOFT);
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(DARK).text('Total Payable', labelX + 12, ty + 10);
+      doc.font(PDF_FONT_BOLD).fontSize(12).fillColor(DARK).text('Total Payable', labelX + 12, ty + 10);
       doc.fillColor(BLUE).text(money(invoice.outstandingPaise), M, ty + 10, { width: right - M - 12, align: 'right' });
 
       // Footer
-      doc.font('Helvetica').fontSize(8.5).fillColor(LIGHT).text(
+      doc.font(PDF_FONT).fontSize(8.5).fillColor(LIGHT).text(
         `This is a system-generated invoice from ${societyName || 'your society'}. For queries contact your managing committee.`,
         M, 770, { width: right - M, align: 'center' },
       );

@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import { HostKind } from './visitor-entry.model';
 
 /**
  * "There is someone at the gate for you."
@@ -32,6 +33,19 @@ export interface IApprovalRequest extends Document {
   flatId?: mongoose.Types.ObjectId;
   flatLabel?: string;
   blockId?: mongoose.Types.ObjectId;
+
+  /**
+   * Who the visit is FOR — the same polymorphic host the entry carries.
+   *
+   * Mirrored here rather than read through `visitorEntryId` because the request
+   * is created BEFORE the entry, and the notification that asks somebody to
+   * allow a visitor has to be able to name the host at that moment. See
+   * `HostKind` in visitor-entry.model for why a flat id was never enough.
+   */
+  hostKind: HostKind;
+  hostUserId?: mongoose.Types.ObjectId;
+  hostStaffId?: mongoose.Types.ObjectId;
+  hostLabel: string;
 
   visitorName: string;
   visitorPhone?: string;
@@ -82,6 +96,11 @@ const ApprovalRequestSchema = new Schema<IApprovalRequest>({
   flatLabel: { type: String, trim: true },
   blockId: { type: Schema.Types.ObjectId, ref: 'Block' },
 
+  hostKind: { type: String, enum: ['FLAT', 'COMMITTEE', 'OFFICE', 'STAFF'], default: 'FLAT' },
+  hostUserId: { type: Schema.Types.ObjectId, ref: 'User' },
+  hostStaffId: { type: Schema.Types.ObjectId, ref: 'SocietyStaff' },
+  hostLabel: { type: String, trim: true, maxlength: 160, default: '' },
+
   visitorName: { type: String, required: true, trim: true, maxlength: 120 },
   visitorPhone: { type: String, trim: true, maxlength: 20 },
   category: { type: String, required: true },
@@ -110,6 +129,13 @@ const ApprovalRequestSchema = new Schema<IApprovalRequest>({
   updatedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   updatedByName: { type: String, required: true },
 }, { timestamps: true });
+
+// Same guarantee as the entry: a request can always name who it is about, so
+// no notification body ever has to fall back to "somebody is at the gate".
+ApprovalRequestSchema.pre('validate', function (next) {
+  if (!this.hostLabel) this.hostLabel = this.flatLabel || 'The society';
+  next();
+});
 
 // The guard's live list, and the sweep that retires stale ones.
 ApprovalRequestSchema.index({ societyId: 1, outcome: 1, createdAt: -1 });

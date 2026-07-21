@@ -10,6 +10,7 @@ import { VisitorEntry } from '../models/visitor-entry.model';
 import { Complaint } from '../models/complaint.model';
 import { SocietyStaff } from '../models/society-staff.model';
 import { Asset } from '../models/asset.model';
+import { EffectiveAccess } from './access-role.service';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
 
@@ -29,23 +30,57 @@ export const normalisePlate = (raw: string): string =>
 export const normalisePhone = (raw: string): string =>
   String(raw || '').replace(/\D/g, '').slice(-10);
 
+/**
+ * Who is doing this. `onBehalf` means the office — an admin, a committee
+ * member or a guard holding GATE_CONSOLE — registering a vehicle for somebody
+ * else. Anybody else must live in the flat they are naming.
+ */
+export interface VehicleActorOpts { onBehalf?: boolean }
+
+/** A resident may only touch their own flat. Mirrors `gate-pass.issue`. */
+async function assertLivesThere(societyId: string, flatId: any, actor: Actor, opts: VehicleActorOpts) {
+  if (opts.onBehalf) return;
+  const lives = await Resident.exists({
+    societyId: oid(societyId), flatId, userId: oid(actor.userId), isActive: true,
+  });
+  if (!lives) {
+    throw new DepthError(
+      'That flat is not yours. Only the society office can register a vehicle to another flat.', 403,
+    );
+  }
+}
+
 export async function addVehicle(
   societyId: string,
   input: { flatId: string; number: string; kind?: VehicleKind; make?: string; colour?: string; parkingSlot?: string },
   actor: Actor,
+  opts: VehicleActorOpts = {},
 ): Promise<IResidentVehicle> {
   const flat = await Flat.findOne({ _id: oid(input.flatId), societyId: oid(societyId) }).lean();
   if (!flat) throw new DepthError('That flat could not be found.', 404);
+
+  // Checked here rather than in the controller so every future caller inherits
+  // it. Without this, any resident could put a plate on a neighbour's flat —
+  // which put a car in the guard's autocomplete under the wrong home, and, via
+  // the unique index below, let somebody squat a plate so its real owner could
+  // never register it.
+  await assertLivesThere(societyId, flat._id, actor, opts);
 
   const number = normalisePlate(input.number);
   if (number.length < 4) throw new DepthError('That does not look like a registration number.');
 
   const clash = await ResidentVehicle.findOne({ societyId: oid(societyId), number, isActive: true }).lean();
   if (clash) {
+    const sameFlat = String(clash.flatId) === String(flat._id);
     throw new DepthError(
-      String(clash.flatId) === String(flat._id)
+      sameFlat
         ? 'That vehicle is already on this flat.'
-        : `That vehicle is already registered to ${clash.flatLabel || 'another flat'}.`,
+        // Only the office is told WHICH flat. Naming it to a resident turns
+        // this endpoint into a lookup for "whose car is this?", answerable by
+        // anybody willing to guess a number plate.
+        : opts.onBehalf
+          ? `That vehicle is already registered to ${clash.flatLabel || 'another flat'}.`
+          : 'That vehicle is already registered in this society. Ask the office if you think this is wrong.',
     );
   }
 
@@ -64,11 +99,20 @@ export async function addVehicle(
   });
 }
 
-export async function removeVehicle(societyId: string, id: string, actor: Actor): Promise<boolean> {
+export async function removeVehicle(
+  societyId: string, id: string, actor: Actor, opts: VehicleActorOpts = {},
+): Promise<boolean> {
+  const vehicle = await ResidentVehicle.findOne(
+    { _id: oid(id), societyId: oid(societyId), isActive: true },
+  ).select('flatId').lean();
+  if (!vehicle) return false;
+
+  await assertLivesThere(societyId, vehicle.flatId, actor, opts);
+
   // Deactivated, not deleted. The register still refers to it, and a car that
   // vanishes from history makes last month's entries unexplainable.
   const res = await ResidentVehicle.updateOne(
-    { _id: oid(id), societyId: oid(societyId), isActive: true },
+    { _id: vehicle._id, isActive: true },
     { $set: { isActive: false, updatedBy: oid(actor.userId), updatedByName: actor.userName } },
   );
   return res.modifiedCount > 0;
@@ -289,17 +333,36 @@ export async function checkBlocked(
  * conversation, and making them load four screens to have it means they have
  * it once and never again.
  */
-export async function opsReport(societyId: string, from: Date, to: Date) {
+export async function opsReport(societyId: string, from: Date, to: Date, access?: EffectiveAccess) {
   const sid = oid(societyId);
   const window = { $gte: from, $lte: to };
 
+  /**
+   * The wing scope, which this report used to ignore completely.
+   *
+   * `list` and `detail` on both the gate and complaints narrow a wing-scoped
+   * committee member to their own wings — and then this report handed them
+   * every entry and every complaint in the society, with `flatLabel` attached.
+   * A scope enforced on four screens and dropped on the fifth is not a scope.
+   *
+   * Rows with no wing at all (a society-wide contractor, a common-area
+   * complaint) stay visible, matching `allowsBlock`: "A and B wing" has never
+   * meant "nothing that belongs to the whole society".
+   */
+  const wings = access && !access.isAdmin && access.scope && !access.scope.allBlocks
+    ? access.scope.blockIds.map(oid)
+    : null;
+  const scoped = wings
+    ? { $or: [{ blockId: { $in: wings } }, { blockId: { $exists: false } }, { blockId: null }] }
+    : {};
+
   const [entries, complaints, staff] = await Promise.all([
-    VisitorEntry.find({ societyId: sid, enteredAt: window },
+    VisitorEntry.find({ societyId: sid, enteredAt: window, ...scoped },
       { category: 1, enteredAt: 1, exitedAt: 1, isEstimated: 1, blockId: 1, flatLabel: 1 }).lean(),
-    Complaint.find({ societyId: sid, createdAt: window },
+    Complaint.find({ societyId: sid, createdAt: window, ...scoped },
       { category: 1, status: 1, createdAt: 1, firstRespondedAt: 1, resolvedAt: 1, closedAt: 1,
         assigneeStaffId: 1, assigneeName: 1, assetId: 1, reopenCount: 1, rating: 1,
-        firstResponseDueAt: 1, resolutionDueAt: 1 }).lean(),
+        firstResponseDueAt: 1, resolutionDueAt: 1, totalPausedMs: 1 }).lean(),
     // `designation`, not `category` — SocietyStaff has no `category` path, so
     // the old projection asked for a field that does not exist. Only the count
     // was ever read, which is why nothing broke and nothing was noticed.
@@ -317,10 +380,29 @@ export async function opsReport(societyId: string, from: Date, to: Date) {
   const done = complaints.filter(c => c.resolvedAt);
   const responded = complaints.filter(c => c.firstRespondedAt);
 
-  const avgMinutes = (rows: any[], startKey: string, endKey: string) => {
+  /**
+   * The mean of a span, in minutes — optionally minus the time nobody could work.
+   *
+   * `minusHeld` is the whole point. Without it this report measured raw
+   * `createdAt → resolvedAt` while `complaint.service.stats()` measured the same
+   * tickets with `totalPausedMs` taken out, so a committee reading the
+   * operations report and the complaints dashboard on the same afternoon was
+   * told two different numbers about the same work — and the bigger one, the one
+   * that looks like a verdict on the staff, included every hour a flat was
+   * locked and nobody could get in. A figure that counts a delay nobody could
+   * act on is not a measure of how fast the society is.
+   *
+   * Negatives are dropped rather than clamped, exactly as `stats()` drops them:
+   * a pause total outrunning the elapsed time is impossible unless a clock
+   * moved, and a bogus zero would drag the mean down as surely as a bogus week
+   * would drag it up.
+   */
+  const avgMinutes = (rows: any[], startKey: string, endKey: string, minusHeld = false) => {
     const spans = rows
       .filter(r => r[startKey] && r[endKey])
-      .map(r => (new Date(r[endKey]).getTime() - new Date(r[startKey]).getTime()) / 60000);
+      .map(r => (new Date(r[endKey]).getTime() - new Date(r[startKey]).getTime()
+        - (minusHeld ? (r.totalPausedMs || 0) : 0)) / 60000)
+      .filter(m => m >= 0);
     return spans.length ? Math.round(spans.reduce((a, b) => a + b, 0) / spans.length) : null;
   };
 
@@ -408,8 +490,25 @@ export async function opsReport(societyId: string, from: Date, to: Date) {
       resolved: done.length,
       stillOpen: complaints.filter(c => !c.resolvedAt && !c.closedAt).length,
       reopened: complaints.filter(c => (c.reopenCount || 0) > 0).length,
+      /**
+       * Wall clock, holds included — and deliberately NOT on the same basis as
+       * the fix time below.
+       *
+       * `totalPausedMs` is a LIFETIME total, and most of it is banked after
+       * somebody has already replied: the technician attends, finds no parts,
+       * and the ticket sits on hold for a week. Subtracting that week from a
+       * gap that ended on day one would not correct the reply figure, it would
+       * gut it — every long hold pushing another ticket's reply time towards
+       * zero. Nothing records how much of the hold fell BEFORE the reply, so the
+       * honest choice is to leave this one alone and say which basis it is on.
+       *
+       * The SLA percentage beside it does account for holds, because `resume`
+       * pushes `firstResponseDueAt` out by the paused time on the row itself.
+       */
       avgFirstResponseMinutes: avgMinutes(responded, 'createdAt', 'firstRespondedAt'),
-      avgResolutionMinutes: avgMinutes(done, 'createdAt', 'resolvedAt'),
+      // Held time excluded, matching `complaint.service.stats()` exactly — one
+      // society, one answer to "how long do we take to fix things".
+      avgResolutionMinutes: avgMinutes(done, 'createdAt', 'resolvedAt', true),
       firstResponseSlaMet: withResponseDue.length
         ? Math.round((respondedOnTime / withResponseDue.length) * 1000) / 10 : null,
       firstResponseMeasuredOn: withResponseDue.length,

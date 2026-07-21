@@ -231,6 +231,9 @@ const chargeHeadFields = z.object({
   sacCode: z.string().optional(),
   countsTowardRwaExemption: z.boolean().optional(),
   isRecurring: z.boolean().optional(),
+  // MONTHLY unless said otherwise, so every head that exists keeps its habits.
+  billingFrequency: z.enum(['MONTHLY', 'YEARLY']).optional(),
+  annualBillingMonth: z.number().int().min(1).max(12).optional(),
   isActive: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
 });
@@ -273,6 +276,12 @@ const pricingCoherence = (v: any, ctx: z.RefinementCtx) => {
       need(!!v.percentValue, 'percentValue', 'Set the percentage to charge');
       need(!!v.percentOf, 'percentOf', 'Choose what the percentage is taken of');
       break;
+  }
+
+  // A yearly head with no month would be skipped in all twelve — billed never,
+  // silently, which is the same class of failure as a mode with no rate.
+  if (v.billingFrequency === 'YEARLY') {
+    need(!!v.annualBillingMonth, 'annualBillingMonth', 'Which month do you raise this? Most societies use April.');
   }
 };
 

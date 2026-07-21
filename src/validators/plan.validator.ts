@@ -13,8 +13,31 @@ const billingCycleSchema = z.object({
   razorpayPlanId: z.string().optional(),
 });
 
-// Capability limits: integers (-1 means unlimited)
-const capabilitiesSchema = z.record(z.string(), z.number());
+/**
+ * Capability limits — one number per sellable module, and every value is
+ * load-bearing:
+ *
+ *   0   not in this plan. The module is invisible and its API returns 404 for
+ *       everyone in that society, the admin included.
+ *   -1  unlimited (absent means the same thing).
+ *   N   included, capped at N.
+ *
+ * The bound is `-1`, not "any negative", because that is the only negative
+ * anything downstream reads. `planLimit` hands whatever it finds to
+ * `enforceCapacity` as the ceiling, so a stored `-5` becomes `used >= -5` —
+ * true for an empty society — and every single creation is refused with a
+ * message saying the plan covers -5 flats. A typo in a number box should not
+ * be able to freeze a society, so it is refused here instead.
+ *
+ * Fractions are refused for the same reason: `2.5 staff` is not a number
+ * anybody meant, and it reads back to an admin as a limit they cannot reach.
+ */
+const capabilitiesSchema = z.record(
+  z.string(),
+  z.number()
+    .int('A plan limit must be a whole number')
+    .min(-1, 'A plan limit must be 0 (not in this plan), -1 (unlimited) or a positive number'),
+);
 
 export const createPlanSchema = z.object({
   name: z.string().min(2, 'Plan name must be at least 2 characters'),

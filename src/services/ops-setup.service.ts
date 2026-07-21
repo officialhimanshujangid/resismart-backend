@@ -76,7 +76,7 @@ export async function resolveOpsSetup(societyId: string): Promise<OpsSetupState>
       title: 'Name your gates',
       why: 'Until a gate exists, the register cannot say which door anybody came through — and a society with two entrances has no way to tell them apart afterwards.',
       done: gateCount > 0,
-      href: '/dashboard/gate/gates',
+      href: '/dashboard/visitors/gates',
     });
     steps.push({
       key: 'EXIT', module: 'GATE',
@@ -85,7 +85,7 @@ export async function resolveOpsSetup(societyId: string): Promise<OpsSetupState>
       // The stamp, not the value: `trackExit` defaults to true, so its value
       // alone cannot tell a decision from a default.
       done: !!policy?.gate?.exit?.answeredAt,
-      href: '/dashboard/gate/settings',
+      href: '/dashboard/visitors/settings',
     });
     steps.push({
       key: 'GUARD_LOGIN', module: 'GATE',

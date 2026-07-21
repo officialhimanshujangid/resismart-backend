@@ -101,17 +101,22 @@ export function publish(societyId: string, userIds: string[], event: string, dat
   return sent;
 }
 
-/** Everyone in the society who is currently watching — for gate-wide events. */
-export function publishToSociety(societyId: string, event: string, data: unknown): number {
-  if (clients.size === 0) return 0;
-  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  let sent = 0;
-  for (const c of clients.values()) {
-    if (c.societyId !== societyId) continue;
-    try { c.res.write(frame); sent++; } catch { drop(c.id); }
-  }
-  return sent;
-}
+/**
+ * There is deliberately no society-wide publish.
+ *
+ * There was one, and the gate used it to fan approval outcomes — the visitor's
+ * name and the name of the resident who answered — to every connected client
+ * in the society. It was invisible in the UI, so it read as harmless; in fact
+ * it put "who is visiting whom, in every flat" into the DOM of every resident
+ * with a tab open, reachable by ten lines of script.
+ *
+ * The lesson is not "that one caller was wrong". It is that a channel with no
+ * addressee will eventually be used by something that has one, because it is
+ * the path of least resistance. Every event here carries an audience or it
+ * does not go out. If a genuine all-members announcement is ever needed, it
+ * should be a notification — which has a record, a read state and a mute — not
+ * an unlogged frame.
+ */
 
 /** How many screens are open. Diagnostics only. */
 export function connectionCount(): number {

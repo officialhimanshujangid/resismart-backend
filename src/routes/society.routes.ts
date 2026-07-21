@@ -64,11 +64,13 @@ import {
   downloadTenancyDocument,
 } from '../controllers/household.controller';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
+import { requirePermissionUnlessResident } from '../middlewares/access.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import * as flatDocumentController from '../controllers/flat-document.controller';
 import { addFlatDocumentSchema } from '../validators/flat-document.validator';
 import { addDocumentSchema } from '../validators/household.validator';
 import { enforceLimit } from '../middlewares/subscription.guard';
+import { enforceCapacity } from '../middlewares/entitlement.middleware';
 import { uploadExcel } from '../middlewares/upload.middleware';
 import { Flat } from '../models/flat.model';
 import mongoose from 'mongoose';
@@ -94,6 +96,27 @@ const FLAT_PRIVATE_ROLES = [
   UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE,
   UserRole.RESIDENT_OWNER, UserRole.RESIDENT_TENANT, UserRole.FAMILY_MEMBER,
 ];
+
+/**
+ * ...and of those, which ones need to have been GIVEN the directory.
+ *
+ * `RESIDENTS_VIEW` is the permission whose own blurb reads "Names and contact
+ * details. A gatekeeper does not need this." It had **zero** enforcement sites:
+ * setting it to NONE hid the Property menu and nothing else, so any committee
+ * member — including one holding a seat with no role assigned at all — could
+ * read every resident's name and phone number, download household ID scans,
+ * and pull the flat timeline, which carries sale prices and rents.
+ *
+ * Residents are exempt because `flat-access.service` already clamps them to
+ * their own household, which is a tighter limit than any permission.
+ *
+ * Reads only, on purpose. There is no `RESIDENTS_MANAGE` module yet, and
+ * gating writes on a *view* permission would take household management away
+ * from every seeded committee role (Chairman and Secretary hold READ, not
+ * FULL). Splitting view from manage is the follow-up; leaking the directory
+ * was the bug worth stopping first.
+ */
+const canReadResidents = requirePermissionUnlessResident('RESIDENTS_VIEW', 'READ');
 
 // --- Public self-registration (landing page) ---
 router.post('/register-public', registerSocietyPublic);
@@ -144,7 +167,7 @@ router.get('/flats/:flatId', authenticateJWT, enforceTenantAccess, getFlatById);
 router.delete('/flats/:flatId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN]), deleteFlat);
 
 // --- Resident endpoints (within the active society tenant) ---
-router.get('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), getResidentsByFlat);
+router.get('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,getResidentsByFlat);
 router.post('/flats/:flatId/residents', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), addResident);
 router.put('/residents/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), updateResident);
 router.delete('/residents/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), removeResident);
@@ -154,16 +177,16 @@ const HOUSEHOLD_ROLES = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, Use
 // Household and events carry names, contact details and the flat's private
 // history. The controller now enforces the household boundary itself; these
 // role lists keep the gate guard out of the door entirely.
-router.get('/flats/:flatId/household', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), getHousehold);
-router.get('/flats/:flatId/events', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), getFlatEvents);
-router.post('/flats/:flatId/household', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), addHouseholdMember);
+router.get('/flats/:flatId/household', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,getHousehold);
+router.get('/flats/:flatId/events', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,getFlatEvents);
+router.post('/flats/:flatId/household', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), enforceCapacity('max_member_count'), addHouseholdMember);
 router.put('/household/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), updateHouseholdMember);
 router.post('/household/:residentId/set-head', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), setHouseholdHead);
 // `validate` in front, because the controller parses OUTSIDE its try/catch —
 // so a bad body threw an unhandled rejection and took the whole process down
 // rather than returning a 400. The shared middleware answers properly.
 router.post('/household/:residentId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), validate(addDocumentSchema), addHouseholdDocument);
-router.get('/household/:residentId/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), downloadHouseholdDocument);
+router.get('/household/:residentId/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,downloadHouseholdDocument);
 router.delete('/household/:residentId', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), removeHouseholdMember);
 
 // --- Flat documents (title papers that outlive whoever lives there) ---
@@ -174,15 +197,15 @@ router.delete('/household/:residentId', authenticateJWT, enforceTenantAccess, au
 // purchase price. These role lists are only the outer gate; owners are let
 // through here and then checked properly in the service.
 const FLAT_DOC_ROLES = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER, UserRole.FAMILY_MEMBER];
-router.get('/flats/:flatId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_DOC_ROLES), flatDocumentController.list);
-router.get('/flats/:flatId/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_DOC_ROLES), flatDocumentController.download);
+router.get('/flats/:flatId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_DOC_ROLES), canReadResidents,flatDocumentController.list);
+router.get('/flats/:flatId/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_DOC_ROLES), canReadResidents,flatDocumentController.download);
 router.post('/flats/:flatId/documents', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER]), validate(addFlatDocumentSchema), flatDocumentController.add);
 router.delete('/flats/:flatId/documents/:docId', authenticateJWT, enforceTenantAccess, authorizeRoles([UserRole.SOCIETY_ADMIN, UserRole.RESIDENT_OWNER]), flatDocumentController.remove);
 
 // --- Tenancy (current tenant household + tenancy documents) ---
-router.get('/flats/:flatId/tenancy', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), getTenancy);
+router.get('/flats/:flatId/tenancy', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,getTenancy);
 router.post('/flats/:flatId/tenancy/documents', authenticateJWT, enforceTenantAccess, authorizeRoles(HOUSEHOLD_ROLES), validate(addDocumentSchema), addTenancyDocument);
-router.get('/flats/:flatId/tenancy/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), downloadTenancyDocument);
+router.get('/flats/:flatId/tenancy/documents/:docId/download', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,downloadTenancyDocument);
 
 // --- Resident registration requests (two-way approval) ---
 router.post(
@@ -201,7 +224,7 @@ router.post('/registration-requests/:requestId/cancel', authenticateJWT, enforce
 const LIFECYCLE_ROLES = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.RESIDENT_OWNER];
 // The timeline carries sale prices and rents. Same door as the rest of the
 // flat's private side.
-router.get('/flats/:flatId/timeline', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), getTimeline);
+router.get('/flats/:flatId/timeline', authenticateJWT, enforceTenantAccess, authorizeRoles(FLAT_PRIVATE_ROLES), canReadResidents,getTimeline);
 router.post('/flats/:flatId/rent-out', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), rentOutFlat);
 router.post('/flats/:flatId/sell', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), sellFlat);
 router.post('/flats/:flatId/end-tenancy', authenticateJWT, enforceTenantAccess, authorizeRoles(LIFECYCLE_ROLES), endTenancy);

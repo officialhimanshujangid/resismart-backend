@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { Resident } from '../models/resident.model';
+import { Flat, FlatStatus } from '../models/flat.model';
 import { SocietyStaff } from '../models/society-staff.model';
 import { Committee } from '../models/committee.model';
 import { CommitteeMember } from '../models/committee-member.model';
@@ -23,17 +24,82 @@ import { logger } from '../utils/logger.util';
 
 const oid = (v: any) => new mongoose.Types.ObjectId(String(v));
 
-/** Everyone living in a flat — owner, tenant and family alike. */
-export async function usersOfFlat(societyId: string, flatId: string): Promise<string[]> {
+/** Why a flat's audience came out the way it did. Recorded, so a gap is visible. */
+export type HouseholdVia =
+  | 'NO_FLAT'
+  | 'VACANT_NO_HOUSEHOLD'
+  | 'RENTED_TENANT_ONLY'
+  | 'RENTED_NO_TENANT_REACHABLE'
+  | 'OWNER_OCCUPIED';
+
+export interface HouseholdAudience {
+  userIds: string[];
+  via: HouseholdVia;
+}
+
+/**
+ * THE privacy boundary for anything that happens at a flat.
+ *
+ * There used to be two functions answering this question — `whoToAsk` in the
+ * gate, which branched on `Flat.status`, and a `usersOfFlat` here, which did
+ * not. Everything that ASKED was correct and everything that merely TOLD was
+ * not, so a landlord who had not lived in the flat for three years was pushed
+ * the name of every person who visited their tenant. Two audiences for one
+ * event is the bug; the fix is that there is now only one, and `usersOfFlat`
+ * is gone rather than deprecated so it cannot be reached for by habit.
+ *
+ * The rules, in the order they are applied:
+ *
+ * - **Vacant** — nobody lives there, so there is no household to tell. Returns
+ *   empty rather than widening to the owner or the committee: who is
+ *   *accountable* for an empty flat is a different question, answered once by
+ *   `whoToAsk`, and answering it here as well is how a committee ends up
+ *   notified twice about one visitor.
+ * - **Rented** — the tenant household ONLY. Not the owner, not the owner's
+ *   family. An owner who wants to know who visits their tenant is describing
+ *   surveillance, not property management.
+ * - **Owner-occupied** — the owner household.
+ *
+ * Never throws: a lookup failure degrades to "nobody was reachable", because a
+ * visitor entry or a complaint must still be recorded when notification fails.
+ */
+export async function householdOfFlat(
+  societyId: string, flatId: string | null | undefined,
+): Promise<HouseholdAudience> {
+  if (!flatId) return { userIds: [], via: 'NO_FLAT' };
+
   try {
-    const rows = await Resident.find(
-      { societyId: oid(societyId), flatId: oid(flatId), isActive: true, userId: { $exists: true } },
-      { userId: 1 },
-    ).lean();
-    return rows.map(r => String(r.userId)).filter(Boolean);
+    const flat = await Flat.findOne({ _id: oid(flatId), societyId: oid(societyId) })
+      .select('status').lean();
+    if (!flat) return { userIds: [], via: 'NO_FLAT' };
+
+    if (flat.status === FlatStatus.VACANT) {
+      return { userIds: [], via: 'VACANT_NO_HOUSEHOLD' };
+    }
+
+    // A person can only be told if they have a login. Somebody recorded in the
+    // register with no contact details is not a silent failure — they are
+    // simply not reachable, and that is visible on their row.
+    const base = {
+      societyId: oid(societyId), flatId: oid(flatId),
+      isActive: true, userId: { $exists: true },
+    };
+
+    if (flat.status === FlatStatus.RENTED) {
+      const tenants = await Resident.find({ ...base, householdType: 'TENANT' }, { userId: 1 }).lean();
+      return tenants.length
+        ? { userIds: tenants.map(t => String(t.userId)).filter(Boolean), via: 'RENTED_TENANT_ONLY' }
+        // Marked rented with no reachable tenant on file. NOT a reason to fall
+        // back to the owner — that would quietly re-open the hole this function
+        // exists to close. The gap is recorded instead.
+        : { userIds: [], via: 'RENTED_NO_TENANT_REACHABLE' };
+    }
+
+    const household = await Resident.find({ ...base, householdType: 'OWNER' }, { userId: 1 }).lean();
+    return { userIds: household.map(r => String(r.userId)).filter(Boolean), via: 'OWNER_OCCUPIED' };
   } catch (e: any) {
     logger.error(`Could not resolve flat recipients: ${e.message}`);
-    return [];
+    return { userIds: [], via: 'NO_FLAT' };
   }
 }
 

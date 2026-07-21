@@ -404,6 +404,20 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
     // Otherwise bill recurring heads only. `isRecurring` used to be ignored here,
     // so a one-time levy was re-billed every single month.
     headQuery.isRecurring = { $ne: false };
+
+    /**
+     * ...and of those, the ones due THIS month.
+     *
+     * A yearly head is billed in one month of twelve. `$ne: 'YEARLY'` rather
+     * than `$eq: 'MONTHLY'` on purpose: every head created before this field
+     * existed has no `billingFrequency` at all, and must keep billing monthly.
+     * An equality test would have silently stopped billing every existing
+     * society on the day this shipped.
+     */
+    headQuery.$or = [
+      { billingFrequency: { $ne: 'YEARLY' } },
+      { billingFrequency: 'YEARLY', annualBillingMonth: pm },
+    ];
   }
   const heads = (await ChargeHead.find(headQuery).lean<IChargeHead[]>())
     .sort((a, b) => (a.pricingMode === 'PERCENTAGE' ? 1 : 0) - (b.pricingMode === 'PERCENTAGE' ? 1 : 0) || a.sortOrder - b.sortOrder);
@@ -506,8 +520,25 @@ export async function generateInvoicesForSociety(societyId: string, opts: Genera
           name: head.name,
           category: head.category,
           pricingMode: head.pricingMode,
-          quantity: head.pricingMode === 'METERED' ? meterUnits : undefined,
-          ratePaise: head.pricingMode === 'METERED' ? head.perUnitRatePaise : undefined,
+          /**
+           * Show the working, not just the total.
+           *
+           * `PER_QUANTITY` was left out of this and it should not have been: a
+           * parking line arrived on the bill as a bare ₹1,000 with no hint that
+           * it was two bays at ₹500. The resident's only way to check it was to
+           * ring the office — and "why is my bill higher this month" after a
+           * second bay was allotted is precisely the question an itemised line
+           * answers by itself. Both modes multiply a count by a rate, so both
+           * can say so.
+           */
+          quantity: head.pricingMode === 'METERED'
+            ? meterUnits
+            : head.pricingMode === 'PER_QUANTITY' && head.quantityKey
+              ? (flat.quantities?.[head.quantityKey] ?? 0)
+              : undefined,
+          ratePaise: head.pricingMode === 'METERED' || head.pricingMode === 'PER_QUANTITY'
+            ? head.perUnitRatePaise
+            : undefined,
           baseAmountPaise: base,
           gstApplicable: gst.gst > 0,
           gstRatePercent: gst.rate || undefined,

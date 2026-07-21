@@ -127,19 +127,33 @@ async function main() {
     catch (e: any) { earlyResolve = e.message; }
     ok('a complaint nobody worked on cannot be RESOLVED', earlyResolve.includes('Nobody has worked'), earlyResolve);
 
-    // Close a fresh one — must NOT backfill resolvedAt.
+    // Close an unworked one — must NOT backfill resolvedAt. (`c2` routes to the
+    // plumber on creation, so it is ASSIGNED; closing from NEW is refused
+    // outright since Phase 5 — see the next assertion.)
     const c2 = await raise(SID, { title: 'Spurious', categoryId: String(plumbCat._id), flatId: String(flat._id) }, actor);
     await close(SID, String(c2._id), actor, mgr);
     const closed = await Complaint.findById(c2._id).lean();
-    eq('closing a NEW complaint sets CLOSED', closed?.status, 'CLOSED');
+    eq('closing an unworked complaint sets CLOSED', closed?.status, 'CLOSED');
     ok('...and does NOT invent a resolution time (the stats-flattering bug)', !closed?.resolvedAt,
       `resolvedAt=${closed?.resolvedAt}`);
+
+    // The other half of that same defect. Closing from NEW was the only way to
+    // dispose of junk, so everybody used it, and every one of those closures
+    // read as a complaint that had run its course.
+    let closeFromNew = '';
+    try { await close(SID, String(orphan._id), actor, mgr); }
+    catch (e: any) { closeFromNew = e.message; }
+    ok('a complaint nobody has touched cannot be CLOSED — it is rejected instead',
+      closeFromNew.includes('reject it'), closeFromNew);
 
     // ============================================================== unassign
     console.log('\nUnassigning does not erase work that has begun');
     await respond(SID, String(c1._id), 'On my way', { userId: String(plumber._id), userName: 'Vijay' }, plumberScope);
     eq('the complaint is now in progress', (await Complaint.findById(c1._id).lean())?.status, 'IN_PROGRESS');
-    await assignTo(SID, String(c1._id), null, actor);
+    // `mgr`, because `assignTo` is now scoped like every other action — it used
+    // to take only the society, so a wing-scoped member could reassign another
+    // wing's work.
+    await assignTo(SID, String(c1._id), null, actor, mgr);
     const unassigned = await Complaint.findById(c1._id).lean();
     ok('...and unassigning leaves it IN_PROGRESS, not rewound to NEW',
       unassigned?.status === 'IN_PROGRESS', `status=${unassigned?.status}`);

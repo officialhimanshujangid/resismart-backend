@@ -130,6 +130,27 @@ export class PlanController {
       const plan = await Plan.findOne({ _id: req.params.id, isSystem: false });
       if (!plan) return res.status(404).json({ success: false, message: 'Plan not found' });
 
+      /**
+       * Capabilities MERGE; they do not replace.
+       *
+       * `capabilities` is a Map, and `doc.set()` on a Map path swaps the whole
+       * map for whatever arrived. So a caller sending `{ max_flat_count: 200 }`
+       * — a perfectly reasonable-looking partial update — used to drop every
+       * other key on the plan. And a dropped key is not "no access": absent
+       * means UNLIMITED to `planAllows`/`planLimit`, so the plan would quietly
+       * hand every society on it every module, uncapped, for free.
+       *
+       * Merging costs the ability to delete a key through the API. Nothing
+       * needs it: `-1` and absent are read identically everywhere, so an owner
+       * who wants a capability uncapped writes `-1` and gets exactly that.
+       */
+      if (parsed.data.capabilities) {
+        const existing = plan.capabilities instanceof Map
+          ? Object.fromEntries(plan.capabilities)
+          : ((plan.capabilities as any) || {});
+        parsed.data.capabilities = { ...existing, ...parsed.data.capabilities };
+      }
+
       // Snapshot pricing-relevant state so we can keep Razorpay plan ids that are still valid.
       const oldBase = plan.basePrice;
       const oldCycles = plan.billingCycles.map((c) => ({ tenure: c.tenure, discountPercent: c.discountPercent, durationMonths: c.durationMonths, razorpayPlanId: c.razorpayPlanId }));

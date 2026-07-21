@@ -136,6 +136,8 @@ export async function createChargeHead(societyId: string, body: any, actor: { us
     sacCode: body.sacCode,
     countsTowardRwaExemption: body.countsTowardRwaExemption ?? true,
     isRecurring: body.isRecurring ?? true,
+    billingFrequency: body.billingFrequency ?? 'MONTHLY',
+    annualBillingMonth: body.billingFrequency === 'YEARLY' ? body.annualBillingMonth : undefined,
     isActive: body.isActive ?? true,
     sortOrder: body.sortOrder ?? 100,
     createdBy: actor.userId,
@@ -179,7 +181,8 @@ export async function updateChargeHead(societyId: string, id: string, body: any,
     'name', 'description', 'category', 'pricingMode', 'uniformAmountPaise', 'perSizeAmounts', 'perBlockAmounts',
     'ratePerSqftPaise', 'areaBasis', 'perUnitRatePaise', 'meterType', 'quantityKey', 'percentOf', 'percentValue',
     'billTo', 'gstApplicable', 'gstRatePercent', 'sacCode',
-    'countsTowardRwaExemption', 'isRecurring', 'isActive', 'sortOrder',
+    'countsTowardRwaExemption', 'isRecurring', 'billingFrequency', 'annualBillingMonth',
+    'isActive', 'sortOrder',
   ];
   for (const key of assignable) {
     if (body[key] !== undefined) (head as any)[key] = body[key];

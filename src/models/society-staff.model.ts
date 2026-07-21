@@ -42,6 +42,27 @@ export interface IStaffDocument {
   uploadedByName: string;
 }
 
+/**
+ * One closed stretch of employment.
+ *
+ * A guard who leaves in June and comes back in September used to be added
+ * again as a fresh `SF/xxxx`, because `endEmployment` refused an inactive row
+ * and there was no way back. That split their history in two — old complaints
+ * under one code, new ones under another — and counted them TWICE in
+ * `agencyHeadcount`, which is the one number the whole staff module exists to
+ * get right.
+ *
+ * So `reinstate` reopens the original row and pushes the finished stretch here.
+ * `joinedOn` on the record itself always means "start of the CURRENT stretch";
+ * `spells[0].joinedOn` is the day they first walked in.
+ */
+export interface IEmploymentSpell {
+  joinedOn: Date;
+  leftOn: Date;
+  /** Who marked them as having left, so the gap can be asked about. */
+  endedByName?: string;
+}
+
 export interface ISocietyStaff extends Document {
   societyId: mongoose.Types.ObjectId;
   staffCode: string;
@@ -78,10 +99,22 @@ export interface ISocietyStaff extends Document {
     verifiedBy?: string;
     documentKey?: string;
     expiresOn?: Date;
+    /**
+     * The expiry date the nightly sweep has already warned about.
+     *
+     * Same shape as `Asset.amcWarnedForExpiry`, and for the same reason: a
+     * reminder that repeats every night for thirty nights is a reminder people
+     * mute. Storing the DATE rather than a flag means renewing the
+     * verification — which writes a new `expiresOn` — automatically re-arms the
+     * warning for the next lapse.
+     */
+    warnedForExpiry?: Date;
   };
 
   emergencyContact?: { name: string; phone: string; relation?: string };
   documents: IStaffDocument[];
+  /** Finished stretches of employment. See `IEmploymentSpell`. */
+  spells: IEmploymentSpell[];
   notes?: string;
 
   createdBy: mongoose.Types.ObjectId;
@@ -100,6 +133,12 @@ const StaffDocumentSchema = new Schema<IStaffDocument>({
   uploadedAt: { type: Date, default: Date.now },
   uploadedByName: { type: String, required: true },
 }, { _id: true });
+
+const EmploymentSpellSchema = new Schema<IEmploymentSpell>({
+  joinedOn: { type: Date, required: true },
+  leftOn: { type: Date, required: true },
+  endedByName: { type: String, trim: true },
+}, { _id: false });
 
 const SocietyStaffSchema = new Schema<ISocietyStaff>({
   societyId: { type: Schema.Types.ObjectId, ref: 'Society', required: true },
@@ -128,6 +167,7 @@ const SocietyStaffSchema = new Schema<ISocietyStaff>({
     verifiedBy: { type: String, trim: true },
     documentKey: { type: String },
     expiresOn: { type: Date },
+    warnedForExpiry: { type: Date },
   },
 
   emergencyContact: {
@@ -136,6 +176,7 @@ const SocietyStaffSchema = new Schema<ISocietyStaff>({
     relation: { type: String, trim: true },
   },
   documents: { type: [StaffDocumentSchema], default: [] },
+  spells: { type: [EmploymentSpellSchema], default: [] },
   notes: { type: String, trim: true },
 
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },

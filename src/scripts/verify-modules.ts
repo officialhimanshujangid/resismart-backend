@@ -80,7 +80,17 @@ function getSidebarOpsModules(): { tagged: string[]; ungated: string[] } {
   for (const line of src.split('\n')) {
     const label = /label:\s*'([^']+)'/.exec(line)?.[1];
     if (!label || /opsModule:/.test(line)) continue;
-    if (/href:\s*'\/dashboard\/(gate|staff|complaints|assets)/.test(line)) ungated.push(label);
+    // `visitors`, not `gate`: the module moved to /dashboard/visitors/* in the
+    // Tier-2 rename and the old folder is gone. The old name is deliberately NOT
+    // kept as an alternation — a link that reverted to /dashboard/gate would
+    // then still be counted here and this assertion would go quiet about it.
+    //
+    // `operations` and `parking` were added when the settings screens were
+    // gathered into one Settings group: the module switchboard lives at
+    // /dashboard/operations/modules and the bay editor at
+    // /dashboard/parking/settings, and both must stay ungated for the same
+    // reason Operations Settings must.
+    if (/href:\s*'\/dashboard\/(visitors|staff|complaints|assets|operations|parking)/.test(line)) ungated.push(label);
   }
   return { tagged, ungated };
 }
@@ -207,7 +217,11 @@ async function main() {
       JSON.stringify(nav.tagged.filter(k => !(FINANCE_MODULES as readonly string[]).includes(k))));
     // The core is what a society cannot bill without. If one of these ever gets a
     // module tag, a society could switch off its own ability to raise a bill.
-    for (const core of ['Overview', 'Invoices', 'Collections', 'Confirmations', 'Charge Heads', 'Reports', 'Settings']) {
+    // 'Finance Settings' was a bare 'Settings' until the sidebar gathered every
+    // config screen into one Settings group — at which point "Settings →
+    // Settings" was what an admin actually read. The screen and its href are
+    // unchanged; only the label moved.
+    for (const core of ['Overview', 'Invoices', 'Collections', 'Confirmations', 'Charge Heads', 'Reports', 'Finance Settings']) {
       ok(`"${core}" is core and can never be hidden`, nav.untagged.includes(core), JSON.stringify(nav.untagged));
     }
     ok('every optional module has at least one screen behind it',
@@ -223,14 +237,33 @@ async function main() {
 
     /**
      * The one that would have caught it. Every module must have a screen, or
-     * the toggle switches nothing; and every module must be ON for a fresh
-     * society, or the screen exists and nobody can find it.
+     * the toggle switches nothing.
+     *
+     * "...and a new society gets it" is NOT universal, and PARKING is the
+     * deliberate exception. The other three describe something every society
+     * already does on paper — a visitor register, a complaint book, a list of
+     * who works here — so defaulting them on matches what is already true. A
+     * society opening an empty parking map with no bays drawn in it learns
+     * only that the screen looks broken; parking is opted into from the
+     * settings wizard, which creates the bays in the same breath.
+     *
+     * Listed explicitly rather than skipped, so adding a fifth module forces
+     * somebody to make this decision on purpose instead of inheriting it.
      */
+    const OFF_UNTIL_ASKED_FOR: readonly string[] = ['PARKING'];
+
     for (const m of OPS_MODULES) {
       ok(`"${m}" has at least one screen behind it`, opsNav.tagged.includes(m),
         JSON.stringify(opsNav.tagged));
-      ok(`...and a new society gets it`, (DEFAULT_OPS_MODULES as readonly string[]).includes(m),
-        JSON.stringify(DEFAULT_OPS_MODULES));
+
+      if (OFF_UNTIL_ASKED_FOR.includes(m)) {
+        ok(`...and a new society does NOT get it until they ask`,
+          !(DEFAULT_OPS_MODULES as readonly string[]).includes(m),
+          JSON.stringify(DEFAULT_OPS_MODULES));
+      } else {
+        ok(`...and a new society gets it`, (DEFAULT_OPS_MODULES as readonly string[]).includes(m),
+          JSON.stringify(DEFAULT_OPS_MODULES));
+      }
     }
 
     /**
@@ -242,6 +275,30 @@ async function main() {
      */
     ok('Operations Settings is never behind a module',
       opsNav.ungated.includes('Operations Settings'), JSON.stringify(opsNav.ungated));
+
+    /**
+     * ...and the switchboard, which used to have no menu entry at all.
+     *
+     * `/dashboard/operations/modules` is where the modules are turned on and
+     * off. It was reachable only by clicking a button on a sibling page, so a
+     * society that closed the setup wizard could not find it again. It is in
+     * the Settings group now, and asserted here for the same reason Operations
+     * Settings is: put the switchboard behind a module and the switch that
+     * turns something on is unreachable the moment it is off.
+     *
+     * The bay editor (/dashboard/parking/settings) is deliberately NOT in this
+     * list. It IS behind `opsModule: 'PARKING'`, because `opsModules` is
+     * already plan ∩ society — leaving it ungated would show it to a society
+     * whose plan never sold them parking, and `accessModule` cannot prevent
+     * that because a SOCIETY_ADMIN resolves to every permission FULL. The
+     * switchboard above is its plan-aware door.
+     */
+    for (const door of ['What This Society Uses', 'Setting Up']) {
+      ok(`"${door}" is reachable from the menu and never behind a module`,
+        opsNav.ungated.includes(door), JSON.stringify(opsNav.ungated));
+    }
+    ok('the parking bay editor is behind the parking module, not ungated',
+      !opsNav.ungated.includes('Parking Setup'), JSON.stringify(opsNav.ungated));
   } catch (e: any) {
     fail++;
     console.log(`\n  ERROR  ${e.message}\n${e.stack}`);

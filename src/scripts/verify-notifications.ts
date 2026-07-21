@@ -33,7 +33,7 @@ import { Committee } from '../models/committee.model';
 import { CommitteeMember } from '../models/committee-member.model';
 import { notify, listForUser, markRead, purgeOld } from '../services/notification.service';
 import { registerToken, forgetToken, pushToUsers, pruneStaleTokens, publicVapidKey } from '../services/push.service';
-import { usersOfFlat, usersOfCommittee, excluding } from '../services/notify-recipients';
+import { householdOfFlat, usersOfCommittee, excluding } from '../services/notify-recipients';
 import { raise, markWorkDone, close } from '../services/complaint.service';
 import * as sse from '../services/sse.service';
 import '../middlewares/auth.middleware';
@@ -88,20 +88,41 @@ async function main() {
       number: '101', status: FlatStatus.RENTED,
     });
 
-    // An owner and a tenant in the same flat, plus somebody unrelated.
+    // The landlord and the sitting tenant, on a flat that is RENTED.
     await Resident.create([
-      { ...audit(societyId), flatId: flat._id, userId: ownerId, person: { name: 'Owner Rao' }, relationship: 'OWNER', isActive: true },
-      { ...audit(societyId), flatId: flat._id, userId: tenantId, person: { name: 'Tenant Iyer' }, relationship: 'TENANT', isActive: true },
+      { ...audit(societyId), flatId: flat._id, userId: ownerId, person: { name: 'Owner Rao' }, relationship: 'OWNER', householdType: 'OWNER', isActive: true },
+      { ...audit(societyId), flatId: flat._id, userId: tenantId, person: { name: 'Tenant Iyer' }, relationship: 'TENANT', householdType: 'TENANT', isActive: true },
     ]);
 
     // =========================================================== recipients
     console.log('Working out who to tell');
-    const flatUsers = await usersOfFlat(SID, String(flat._id));
-    ok('everyone in the flat is reachable, owner and tenant alike',
-      flatUsers.includes(String(ownerId)) && flatUsers.includes(String(tenantId)));
-    eq('...and nobody else', flatUsers.length, 2);
+    const rented = await householdOfFlat(SID, String(flat._id));
+    // This is the assertion that would have FAILED before: `usersOfFlat` took
+    // every active Resident row, so the landlord was told the name of every
+    // person who visited their tenant and every problem reported inside a home
+    // they do not live in.
+    ok('a rented flat reaches its tenant', rented.userIds.includes(String(tenantId)));
+    ok('...and NOT its landlord', !rented.userIds.includes(String(ownerId)));
+    eq('...and nobody else', rented.userIds.length, 1);
+    eq('...and says why', rented.via, 'RENTED_TENANT_ONLY');
     ok('the person who acted is dropped from their own notification',
-      !excluding(flatUsers, String(ownerId)).includes(String(ownerId)));
+      !excluding(rented.userIds, String(tenantId)).includes(String(tenantId)));
+
+    // The same flat, once the tenant leaves. An empty flat has no household to
+    // tell — deliberately empty rather than falling back to the owner or the
+    // committee, either of which would be a second audience for one event.
+    await Flat.updateOne({ _id: flat._id }, { $set: { status: FlatStatus.VACANT } });
+    const empty = await householdOfFlat(SID, String(flat._id));
+    eq('an empty flat has nobody to tell', empty.userIds.length, 0);
+    eq('...and says so', empty.via, 'VACANT_NO_HOUSEHOLD');
+
+    // Owner-occupied: the owner household, and no tenant rows to confuse it.
+    await Flat.updateOne({ _id: flat._id }, { $set: { status: FlatStatus.OWNER_OCCUPIED } });
+    const lived = await householdOfFlat(SID, String(flat._id));
+    ok('an owner-occupied flat reaches its owner', lived.userIds.includes(String(ownerId)));
+    ok('...and not the old tenant row', !lived.userIds.includes(String(tenantId)));
+
+    await Flat.updateOne({ _id: flat._id }, { $set: { status: FlatStatus.RENTED } });
 
     // The committee is TWO models — the term, then its members. Reading user
     // ids off the term returns nothing at all, silently, which is exactly the
@@ -208,7 +229,9 @@ async function main() {
     eq('both devices were attempted', outcome.attempted, 2);
     ok('...and a failure to deliver is survivable', outcome.delivered >= 0);
 
-    ok('a device can be forgotten', await forgetToken(phone.token));
+    ok('a device can be forgotten by its owner', await forgetToken(phone.token, String(phone.userId)));
+    ok('somebody else cannot forget your device',
+      !(await forgetToken(web.token, String(new mongoose.Types.ObjectId()))));
     eq('...and is genuinely gone', await PushToken.countDocuments({ token: phone.token }), 0);
 
     // Stale pruning needs BOTH conditions. A phone that merely went quiet must
@@ -251,11 +274,16 @@ async function main() {
     await markWorkDone(SID, String(complaint._id), "Washer replaced", [], actor, { canManage: true });
     await settle();
 
+    // The flat is RENTED, so the household is the TENANT — the landlord is not
+    // told what breaks inside a home they do not live in. This assertion used
+    // to say the opposite, because `usersOfFlat` took every Resident row on the
+    // flat; that was the leak, not the rule.
     const ownerNotes = await listForUser(SID, String(ownerId));
-    ok('the owner is asked to confirm the fix',
-      ownerNotes.items.some(i => i.kind === 'COMPLAINT_WORK_DONE'));
+    ok('the landlord is NOT told about the tenant\'s repair',
+      !ownerNotes.items.some(i => i.kind === 'COMPLAINT_WORK_DONE'));
+
     const tenantNotes = await listForUser(SID, String(tenantId));
-    ok('...and so is the tenant who raised it',
+    ok('the tenant who lives there is asked to confirm the fix',
       tenantNotes.items.some(i => i.kind === 'COMPLAINT_WORK_DONE'));
 
     // The manager did the marking, so must not be told about it.
@@ -265,8 +293,11 @@ async function main() {
 
     await close(SID, String(complaint._id), actor, { canManage: true });
     await settle();
-    const afterClose = await listForUser(SID, String(ownerId));
-    ok('closing tells the flat', afterClose.items.some(i => i.kind === 'COMPLAINT_CLOSED'));
+    const afterClose = await listForUser(SID, String(tenantId));
+    ok('closing tells the household that lives there',
+      afterClose.items.some(i => i.kind === 'COMPLAINT_CLOSED'));
+    ok('...and still not the landlord',
+      !(await listForUser(SID, String(ownerId))).items.some(i => i.kind === 'COMPLAINT_CLOSED'));
 
     const linked = afterClose.items.find(i => i.kind === 'COMPLAINT_CLOSED');
     ok('...with a link back to the complaint', !!linked?.link?.includes(String(complaint._id)));

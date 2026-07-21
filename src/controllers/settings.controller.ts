@@ -51,7 +51,28 @@ export class SettingsController {
 
       if (parsed.data.gracePeriodDays !== undefined) setting.gracePeriodDays = parsed.data.gracePeriodDays;
       if (parsed.data.defaultTrialCapabilities) {
-        setting.defaultTrialCapabilities = new Map(Object.entries(parsed.data.defaultTrialCapabilities)) as any;
+        /**
+         * Merge, never replace.
+         *
+         * These capabilities are the free tier, and every value is
+         * load-bearing: `0` means the module does not exist for the society,
+         * `-1` or absent means unlimited, `N` is a cap. Replacing the whole map
+         * with whatever a caller sent meant that any client which did not know
+         * about a key dropped it — and a dropped key reads as UNLIMITED
+         * everywhere downstream, so one save handed every unpaid society an
+         * uncapped module for free. The old settings screen did exactly this
+         * with `max_active_listings`.
+         *
+         * Merging costs the ability to delete a key. Nothing needs it: `-1`
+         * and absent are read identically, so "no ceiling" is still one save
+         * away.
+         */
+        const existing = setting.defaultTrialCapabilities instanceof Map
+          ? Object.fromEntries(setting.defaultTrialCapabilities)
+          : ((setting.defaultTrialCapabilities as any) || {});
+        setting.defaultTrialCapabilities = new Map(
+          Object.entries({ ...existing, ...parsed.data.defaultTrialCapabilities }),
+        ) as any;
       }
       if (parsed.data.expiryReminderDays) {
         setting.expiryReminderDays = [...new Set(parsed.data.expiryReminderDays)].sort((a, b) => b - a);

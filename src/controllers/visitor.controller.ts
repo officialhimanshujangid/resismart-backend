@@ -11,6 +11,8 @@ import { resolveOpsSetup } from '../services/ops-setup.service';
 import { VISITOR_CATEGORIES } from '../models/society-ops-policy.model';
 import { Resident } from '../models/resident.model';
 import { Flat } from '../models/flat.model';
+import { Committee } from '../models/committee.model';
+import { CommitteeMember } from '../models/committee-member.model';
 import { UserRole } from '../constants/roles';
 import { auditFinance } from '../utils/finance-audit.util';
 import { logger } from '../utils/logger.util';
@@ -115,7 +117,11 @@ export const scanEntry = async (req: Request, res: Response) => {
     const societyId = String(req.user!.activeTenantId);
     const guardStaffId = await guardStaffIdOf(req);
     const result = await arrival.arriveByPass(
-      societyId, { code: req.body.code, payload: req.body.payload }, actorOf(req), { guardStaffId },
+      societyId, { code: req.body.code, payload: req.body.payload }, actorOf(req),
+      // A pass carries no photograph, so a society that requires one could not
+      // redeem a pass at all — the rule was unsatisfiable, not merely strict.
+      // The guard supplies at the gate what the invitation could not carry.
+      { guardStaffId, photoKey: req.body.photoKey, visitorPhone: req.body.visitorPhone },
     );
     auditFinance(req, 'VISITOR_ENTRY_PASS', 'VisitorEntry', String(result.entry._id), {
       newValues: { name: result.entry.visitorName, pass: String(result.entry.gatePassId) },
@@ -155,6 +161,12 @@ export const list = async (req: Request, res: Response) => {
     const societyId = String(req.user!.activeTenantId);
     const data = await visitor.listEntries(societyId, req.query as any, {
       residentFlatIds: await residentFlatIds(req),
+      // A clamped reader also sees the visits they were the HOST of. Without
+      // this a committee member gets a push saying somebody has come to see
+      // them, taps it, and lands on a log that does not contain the visit —
+      // which is precisely the "alert about something you cannot see" that made
+      // the vacant-flat notice read as a leak.
+      hostUserId: String(req.user!.userId),
       access: req.access,
     });
     res.json({ success: true, ...data });
@@ -169,6 +181,7 @@ export const photo = async (req: Request, res: Response) => {
       req.query.which === 'vehicle' ? 'vehicle' : 'visitor',
       await residentFlatIds(req),
       req.access,
+      String(req.user!.userId),
     );
     res.json({ success: true, data: { url } });
   } catch (e: any) { fail(res, e, 'open that photo'); }
@@ -207,6 +220,67 @@ export const flatOptions = async (req: Request, res: Response) => {
       })),
     });
   } catch (e: any) { fail(res, e, 'search flats'); }
+};
+
+/**
+ * "Who are they here to see?" — flats AND people, in one box.
+ *
+ * The console could only ever offer a flat, which is why a visitor for the
+ * secretary had nowhere to be filed and ended up notifying nobody. The guard
+ * types a name; this returns the flats, the serving committee and the staff
+ * roll that match, each already shaped as the host the entry will record.
+ *
+ * Deliberately NOT the resident directory, for the same reason `flatOptions`
+ * is not: a committee seat and a staff post are public offices within the
+ * society, and a household is not. No phone numbers, in either case.
+ */
+export const hostOptions = async (req: Request, res: Response) => {
+  try {
+    const societyId = String(req.user!.activeTenantId);
+    const q = String(req.query.q || '').trim();
+    const rx = q ? new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') : null;
+
+    const flatFilter: any = { societyId: oid(societyId) };
+    if (rx) flatFilter.$or = [{ number: rx }, { blockName: rx }];
+
+    const term = await Committee.findOne({ societyId: oid(societyId), status: 'ACTIVE' }, { _id: 1 }).lean();
+    const memberFilter: any = { societyId: oid(societyId), status: 'ACTIVE', committeeId: term?._id };
+    if (rx) memberFilter.$or = [{ 'memberSnapshot.name': rx }, { designationLabel: rx }];
+
+    const staffFilter: any = { societyId: oid(societyId), isActive: true };
+    if (rx) staffFilter.$or = [{ 'person.name': rx }, { designation: rx }];
+
+    const [flats, members, staff] = await Promise.all([
+      Flat.find(flatFilter).select('number blockName blockId').sort({ blockName: 1, number: 1 }).limit(25).lean(),
+      term ? CommitteeMember.find(memberFilter).select('userId designationLabel memberSnapshot').limit(15).lean() : [],
+      SocietyStaff.find(staffFilter).select('person.name designation').limit(15).lean(),
+    ]);
+
+    res.json({
+      success: true,
+      data: [
+        ...flats.map(f => ({
+          hostKind: 'FLAT' as const,
+          flatId: String(f._id),
+          blockId: f.blockId ? String(f.blockId) : undefined,
+          label: `${f.blockName || ''} ${f.number}`.trim(),
+        })),
+        ...members.map(m => ({
+          hostKind: 'COMMITTEE' as const,
+          hostUserId: String(m.userId),
+          label: `${m.designationLabel} — ${m.memberSnapshot?.name || 'Committee member'}`,
+        })),
+        ...staff.map(s => ({
+          hostKind: 'STAFF' as const,
+          hostStaffId: String(s._id),
+          label: `${String(s.designation || 'Staff').toLowerCase().replace(/_/g, ' ')} — ${s.person?.name || 'Staff'}`,
+        })),
+        // Always offered, never searched for: somebody at the office window has
+        // no name to type, and before this there was no way to log them at all.
+        { hostKind: 'OFFICE' as const, label: 'Society office' },
+      ],
+    });
+  } catch (e: any) { fail(res, e, 'search hosts'); }
 };
 
 // -------------------------------------------------------------------- policy
@@ -263,3 +337,68 @@ export const updatePolicy = async (req: Request, res: Response) => {
     res.json({ success: true, data: policy, message: 'Gate settings saved.' });
   } catch (e: any) { fail(res, e, 'save gate settings'); }
 };
+
+// --------------------------------------------------------------- duty roster
+//
+// The other half of `gate.vacantFlat.handler: 'DUTY_ROSTER'`. Kept on this
+// route surface rather than a module of its own because the rota IS a gate
+// setting — it exists only to answer "who is asked about that empty flat" — and
+// a second settings screen for one table is how a society ends up with a
+// handler selected and a rota nobody knew to fill in.
+
+export const listDutyRoster = async (req: Request, res: Response) => {
+  try {
+    const rows = await opsPolicy.listDutyRoster(String(req.user!.activeTenantId), {
+      blockId: req.query.blockId ? String(req.query.blockId) : undefined,
+      weekday: req.query.weekday !== undefined ? Number(req.query.weekday) : undefined,
+      includeRetired: req.query.all === 'true',
+    });
+    res.json({ success: true, data: rows });
+  } catch (e: any) { fail(res, e, 'load the duty roster'); }
+};
+
+export const addDutyRoster = async (req: Request, res: Response) => {
+  try {
+    const societyId = String(req.user!.activeTenantId);
+    const row = await opsPolicy.addDutyRosterEntry(societyId, req.body, actorOf(req));
+    auditFinance(req, 'OPS_DUTY_ROSTER_ADDED', 'OpsDutyRoster', String(row._id), {
+      newValues: { member: row.memberName, weekday: row.weekday, shift: row.shift, wing: row.blockName },
+    });
+    res.status(201).json({
+      success: true, data: row,
+      // Named out loud: the point of the rota is that somebody knows they are
+      // the one who will be rung, and a bare "Saved." never conveys that.
+      message: `${row.memberName} is on duty${row.blockName ? ` for ${row.blockName}` : ''} on ${WEEKDAYS[row.weekday]}.`,
+    });
+  } catch (e: any) { fail(res, e, 'add that duty entry'); }
+};
+
+export const updateDutyRoster = async (req: Request, res: Response) => {
+  try {
+    const societyId = String(req.user!.activeTenantId);
+    const row = await opsPolicy.updateDutyRosterEntry(societyId, req.params.id, req.body, actorOf(req));
+    auditFinance(req, 'OPS_DUTY_ROSTER_UPDATED', 'OpsDutyRoster', String(row._id), {
+      newValues: { member: row.memberName, weekday: row.weekday, shift: row.shift, isActive: row.isActive },
+    });
+    res.json({ success: true, data: row, message: 'Saved.' });
+  } catch (e: any) { fail(res, e, 'save that duty entry'); }
+};
+
+export const removeDutyRoster = async (req: Request, res: Response) => {
+  try {
+    const societyId = String(req.user!.activeTenantId);
+    const row = await opsPolicy.removeDutyRosterEntry(societyId, req.params.id, actorOf(req));
+    auditFinance(req, 'OPS_DUTY_ROSTER_REMOVED', 'OpsDutyRoster', String(row._id), {
+      newValues: { member: row.memberName, weekday: row.weekday, shift: row.shift },
+    });
+    // Said plainly, because an empty rota is not a broken one — the ladder falls
+    // through to the next rung, and the admin should know what that means.
+    res.json({
+      success: true, data: row,
+      message: `${row.memberName} is off the rota for ${WEEKDAYS[row.weekday]}. If nobody is left on duty, empty-flat callers go to whoever is next on your list.`,
+    });
+  } catch (e: any) { fail(res, e, 'remove that duty entry'); }
+};
+
+/** 0 = Sunday, matching `Date.prototype.getDay()` and the model. */
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];

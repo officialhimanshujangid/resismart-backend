@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticateJWT, authorizeRoles, enforceTenantAccess } from '../middlewares/auth.middleware';
+import { requireModulePermission } from '../middlewares/access.middleware';
 import { validate } from '../middlewares/validate.middleware';
 import { UserRole } from '../constants/roles';
 import * as societyFinanceController from '../controllers/society-finance.controller';
@@ -81,6 +82,21 @@ const router = Router();
 router.use(authenticateJWT);
 router.use(enforceTenantAccess);
 
+/**
+ * The money needs a permission, not just a role.
+ *
+ * Every route below used to carry `authorizeRoles` and nothing else, so
+ * `FINANCE_VIEW` and `FINANCE_MANAGE` were decoration: an admin could set a
+ * committee member to "no access" in the permission editor and that member
+ * could still post journals and confirm payments. A committee member with no
+ * role assigned at all — `awaitingRole` — had the same reach.
+ *
+ * Mounted for the whole router, before the setup gate, so a route added later
+ * inherits it and an unauthorised caller is refused before learning anything
+ * about the society's books.
+ */
+router.use(requireModulePermission('FINANCE_VIEW', 'FINANCE_MANAGE'));
+
 // Nothing may be recorded until the society has said where its books start.
 // Mounted here rather than per-route so a route added later is gated by
 // default — see the middleware for what stays open and why.
@@ -88,7 +104,16 @@ router.use(requireSetupComplete);
 
 // Society Admin & Committee Roles
 const ADMIN_ROLES = [UserRole.SOCIETY_ADMIN];
-const ADMIN_AND_COMMITTEE = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE];
+/**
+ * Employees are here on purpose, and the permission above decides.
+ *
+ * The seeded "Accountant" staff role grants `FINANCE_VIEW: FULL` and
+ * `FINANCE_MANAGE: FULL` — and `SOCIETY_EMPLOYEE` appeared nowhere in this
+ * file, so an admin would hand finance to their accountant and the accountant
+ * got 403 on every screen with nothing to explain why. The role list says who
+ * may be considered; the permission says who may act.
+ */
+const ADMIN_AND_COMMITTEE = [UserRole.SOCIETY_ADMIN, UserRole.SOCIETY_COMMITTEE, UserRole.SOCIETY_EMPLOYEE];
 
 // Opening position — the one question that has to be answered before any of
 // the rest of this file will accept a write.

@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import * as svc from '../services/access-role.service';
 import { AccessError, MODULE_CATALOG } from '../services/access-role.service';
+import { resolveOpsModules, offeredPermissionsFor, planAllows } from '../services/entitlement.service';
+import { getEffectiveLimits } from '../services/subscription-lifecycle.service';
 import { Block } from '../models/block.model';
 import { CommitteeMember } from '../models/committee-member.model';
 import { UserRole } from '../constants/roles';
@@ -25,11 +27,26 @@ export const list = async (req: Request, res: Response) => {
   try {
     const societyId = String(req.user!.activeTenantId);
     const actor = actorOf(req);
-    const [roles, blocks] = await Promise.all([
+    const [roles, blocks, limits] = await Promise.all([
       svc.listRoles(societyId, actor.userId, actor.userName),
       Block.find({ societyId: oid(societyId) }).select('name').sort({ name: 1 }).lean(),
+      getEffectiveLimits(societyId).then(r => r.limits).catch(() => ({} as Record<string, any>)),
     ]);
-    res.json({ success: true, data: { roles, catalog: MODULE_CATALOG, blocks } });
+
+    /**
+     * Only offer permissions for modules this society actually has.
+     *
+     * The catalogue is a flat static list, so an admin was asked whether their
+     * committee member may use the "Gate console" in a society that does not
+     * use the gate at all — and then wondered why granting it did nothing. A
+     * permission editor that offers rows leading nowhere teaches people not to
+     * trust the ones that do.
+     */
+    const opsModules = await resolveOpsModules(societyId, limits);
+    const offered = new Set(offeredPermissionsFor(opsModules, planAllows(limits, 'max_finance_modules')));
+    const catalog = MODULE_CATALOG.filter(m => offered.has(m.key));
+
+    res.json({ success: true, data: { roles, catalog, blocks } });
   } catch (e: any) { fail(res, e, 'load roles'); }
 };
 

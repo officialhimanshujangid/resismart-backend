@@ -1,12 +1,14 @@
 import mongoose from 'mongoose';
-import { VisitorEntry, IVisitorEntry, EntryStatus, AdmittedVia } from '../models/visitor-entry.model';
-import { SocietyOpsPolicy, RESIDENT_MOVEMENT } from '../models/society-ops-policy.model';
+import { VisitorEntry, IVisitorEntry, EntryStatus, AdmittedVia, HostKind } from '../models/visitor-entry.model';
+import {
+  SocietyOpsPolicy, RESIDENT_MOVEMENT, ISocietyOpsPolicy, ID_PROOF_LABELS,
+} from '../models/society-ops-policy.model';
 import { Flat } from '../models/flat.model';
 import { getOrCreateOpsPolicy, approvalRuleFor, expectedStayFor } from './ops-policy.service';
 import { EffectiveAccess, allowsBlock } from './access-role.service';
 import s3Service from './s3.service';
 import { notify } from './notification.service';
-import { usersOfFlat } from './notify-recipients';
+import { resolveHostAudience, HostAudience } from './gate-approval.service';
 import { checkBlocked } from './gate-depth.service';
 import { assertGateFor, defaultGate } from './gate-crud.service';
 import { logger } from '../utils/logger.util';
@@ -69,6 +71,10 @@ export interface RecordEntryInput {
   guardStaffId?: string;
   /** The physical gate they came in by. */
   entryGateId?: string;
+  /** Who they came to see, when it is not simply a flat. See `HostKind`. */
+  hostKind?: HostKind;
+  hostUserId?: string;
+  hostStaffId?: string;
 }
 
 /**
@@ -95,22 +101,49 @@ export interface CreateEntryOptions {
   gatePassId?: string;
   decidedByName?: string;
   decisionReason?: string;
-  /** Send the flat a "somebody arrived" notice. Off for AWAITING — the approval already notified. */
+  /** Send the host a "somebody arrived" notice. Off for AWAITING — the approval already notified. */
   notifyArrival?: boolean;
+  /**
+   * The host, already resolved by the caller.
+   *
+   * Passed in rather than looked up again so the label stored on the entry and
+   * the people notified about it come from ONE resolution. Two lookups either
+   * side of a decision is how a notice ends up naming a host nobody was told
+   * about; it is the same class of bug as having two audience functions.
+   */
+  host?: HostAudience;
+  /**
+   * When they actually walked in — for offline reconciliation only.
+   *
+   * A queued arrival synced at 19:40 happened at 19:05, and writing 19:40
+   * would make the register lie about the evening and give the visitor an
+   * expected departure half an hour late.
+   */
+  enteredAt?: Date;
+  /** The guard device's queue id. The dedupe key; see the model. */
+  offlineClientId?: string;
+  /** See `assertEntryAllowed` — the capture rules do not apply to a fact. */
+  reconciling?: boolean;
 }
 
 /**
- * Write one visitor entry, in whatever state the caller decided.
+ * Everything that can REFUSE an entry, separated from writing one.
  *
- * This is the single place a `VisitorEntry` is born. Everything that used to
- * be three unconnected paths — the guard's log, an approved visitor, a
- * redeemed pass — now goes through here with a different `status` and
- * `admittedVia`, so the register can never again disagree with itself about
- * who is inside.
+ * Pulled out of `createEntry` because of the ordering bug it existed inside:
+ * `arriveByPass` burned the pass first and validated second, so in any society
+ * with `capture.photo = 'REQUIRED'` every single pass redemption threw AFTER
+ * `usedCount` had been incremented. The visitor was turned away and the
+ * invitation was destroyed in the same breath, with no transaction and no
+ * compensating decrement. A caller that is about to do something irreversible
+ * can now ask, first, whether the entry it is going to write is even allowed.
+ *
+ * Returns the policy and the flat it had to load anyway, so the check costs
+ * nothing when `createEntry` immediately follows it.
  */
-export async function createEntry(
-  societyId: string, input: RecordEntryInput, actor: Actor, opts: CreateEntryOptions,
-): Promise<IVisitorEntry> {
+export async function assertEntryAllowed(
+  societyId: string, input: RecordEntryInput, actor: Actor,
+  opts: { reconciling?: boolean } = {},
+): Promise<{ policy: ISocietyOpsPolicy; flat: any }> {
   const policy = await getOrCreateOpsPolicy(societyId, actor.userId, actor.userName);
 
   /**
@@ -137,7 +170,7 @@ export async function createEntry(
     if (policy.gate.residents.logVehicleOnly && !input.vehicleNumber?.trim()) {
       throw new VisitorError('Only resident vehicles are recorded here — a registration number is needed.');
     }
-  } else if (!policy.gate.capture.categoriesEnabled.includes(input.category)) {
+  } else if (!opts.reconciling && !policy.gate.capture.categoriesEnabled.includes(input.category)) {
     throw new VisitorError(`This society does not record "${input.category}" visitors.`);
   }
 
@@ -147,13 +180,65 @@ export async function createEntry(
   const isResident = input.category === RESIDENT_MOVEMENT;
 
   if (!isResident) {
-    if (policy.gate.capture.phone === 'REQUIRED' && !input.visitorPhone) {
-      throw new VisitorError('A phone number is required for every visitor here.');
-    }
-    if (policy.gate.capture.photo === 'REQUIRED' && !input.photoKey) {
-      throw new VisitorError('A photo is required for every visitor here.');
+    /**
+     * REQUIRED means "do not admit without it" — and admitting is exactly what
+     * is no longer on the table when `reconciling` is set.
+     *
+     * That flag is only ever true for an arrival a guard device already let in
+     * while it had no network. The person has been inside for half an hour.
+     * Enforcing a photo rule now cannot produce a photo; it can only decide
+     * whether the register knows they are in the building. Refusing the record
+     * to honour a rule about admission is how a society ends up with a
+     * compliant policy and a wrong list of who is inside.
+     */
+    if (!opts.reconciling) {
+      if (policy.gate.capture.phone === 'REQUIRED' && !input.visitorPhone) {
+        throw new VisitorError('A phone number is required for every visitor here.');
+      }
+      if (policy.gate.capture.photo === 'REQUIRED' && !input.photoKey) {
+        throw new VisitorError('A photo is required for every visitor here.');
+      }
     }
     if (!input.visitorName?.trim()) throw new VisitorError('Who is at the gate?');
+
+    /**
+     * The ID the society actually said it accepts.
+     *
+     * `gate.capture.allowedIdTypes` was configurable-looking and read by
+     * nothing: `idType` arrived as a free string and was written to the register
+     * exactly as sent. So a society that said "driving licence or passport" got
+     * whatever the guard's device happened to send — including, in a keyboard
+     * field, "Aadhaar", the one document this product refuses to hold at a gate
+     * (see `ID_PROOF_TYPES`). A list nobody checks is a list that describes
+     * nothing.
+     *
+     * The check is skipped entirely when `idProof: OFF`, because `createEntry`
+     * then drops `idType` on the floor anyway — refusing an entry over a field
+     * about to be discarded would turn a switched-off feature into an error
+     * message.
+     *
+     * `reconciling` is exempt for the same reason the photo and phone rules are:
+     * the person was admitted an hour ago by a device with no network, and the
+     * only question left is whether the register knows they are in the building.
+     */
+    if (!opts.reconciling && policy.gate.capture.idProof !== 'OFF') {
+      const allowed = policy.gate.capture.allowedIdTypes || [];
+      const said = (ID_PROOF_LABELS[String(input.idType || '')] || String(input.idType || '')).trim();
+      const listed = allowed.map(t => ID_PROOF_LABELS[t] || t).join(', ');
+
+      if (input.idType && !allowed.includes(input.idType)) {
+        throw new VisitorError(
+          listed
+            ? `This society accepts a ${listed} — not a ${said}.`
+            : 'This society does not accept any ID proof at the gate.',
+        );
+      }
+      if (policy.gate.capture.idProof === 'REQUIRED' && (!input.idType || !input.idLast4?.trim())) {
+        throw new VisitorError(
+          `An ID is required for every visitor here — a ${listed || 'proof of identity'}, and its last four digits.`,
+        );
+      }
+    }
   } else if (!input.flatId) {
     throw new VisitorError('Which flat is the resident from?');
   }
@@ -167,7 +252,45 @@ export async function createEntry(
     if (!flat) throw new VisitorError('That flat does not belong to this society.');
   }
 
-  const now = new Date();
+  return { policy, flat };
+}
+
+/**
+ * Write one visitor entry, in whatever state the caller decided.
+ *
+ * This is the single place a `VisitorEntry` is born. Everything that used to
+ * be three unconnected paths — the guard's log, an approved visitor, a
+ * redeemed pass — now goes through here with a different `status` and
+ * `admittedVia`, so the register can never again disagree with itself about
+ * who is inside.
+ */
+export async function createEntry(
+  societyId: string, input: RecordEntryInput, actor: Actor, opts: CreateEntryOptions,
+): Promise<IVisitorEntry> {
+  const { policy, flat } = await assertEntryAllowed(societyId, input, actor, { reconciling: opts.reconciling });
+  const isResident = input.category === RESIDENT_MOVEMENT;
+
+  const hostKind: HostKind = input.hostKind || 'FLAT';
+
+  /**
+   * The host, resolved once and used for both the label and the audience.
+   *
+   * Only looked up here when the caller did not already do it. For an ordinary
+   * flat arrival that nobody needs telling about, the flat row this function
+   * already loaded IS the answer, and a second round trip to learn a label we
+   * are holding would be work for nothing.
+   */
+  const host: HostAudience = opts.host
+    || (hostKind !== 'FLAT' || opts.notifyArrival
+      ? await resolveHostAudience(societyId, {
+          hostKind, flatId: input.flatId, hostUserId: input.hostUserId, hostStaffId: input.hostStaffId,
+        })
+      : {
+          userIds: [], via: 'NOT_RESOLVED', hostKind: 'FLAT',
+          hostLabel: flat ? `${flat.blockName || ''} ${flat.number}`.trim() : 'The society',
+        });
+
+  const now = opts.enteredAt || new Date();
   const stay = expectedStayFor(policy, input.category);
 
   // Checked on phone and plate only — never on name. See gate-blocklist.model
@@ -208,6 +331,14 @@ export async function createEntry(
     flatId: flat?._id,
     flatLabel: flat ? `${flat.blockName || ''} ${flat.number}`.trim() : undefined,
     blockId: flat?.blockId,
+    hostKind,
+    hostUserId: input.hostUserId ? oid(input.hostUserId) : undefined,
+    hostStaffId: input.hostStaffId ? oid(input.hostStaffId) : undefined,
+    // Denormalised deliberately: this is what every screen and every message
+    // says the visit was FOR, and it must keep saying it after the committee
+    // term ends and the seat changes hands.
+    hostLabel: host.hostLabel,
+    offlineClientId: opts.offlineClientId,
     // A resident movement carries its plate whatever `vehicles.track` says: the
     // society switched resident logging on for the car, and dropping the number
     // would leave a row that records nothing at all.
@@ -246,14 +377,24 @@ export async function createEntry(
   // A "somebody arrived" notice — a NOTICE, not an ask. Suppressed for an
   // AWAITING entry, because the approval request already asked and a second
   // message would read as two visitors.
-  if (opts.notifyArrival && entry.flatId && inside) {
+  //
+  // The test is on the HOST, not on `entry.flatId`. It used to be the latter,
+  // which meant a visitor for the secretary or for the office — who by
+  // definition has no flat — produced no notice at all, silently.
+  if (opts.notifyArrival && inside && (entry.flatId || entry.hostUserId || hostKind === 'OFFICE')) {
     (async () => {
-      const to = await usersOfFlat(societyId, String(entry.flatId));
+      // The audience as the gate defines it — a rented flat's tenant and never
+      // its landlord, the committee member actually being visited and not the
+      // whole committee. One function answers this for every kind of host; the
+      // moment there were two, an owner three years gone was being told the
+      // name of every person who visited their tenant.
+      const to = host.userIds;
+      if (!to.length) return;
       await notify({
         societyId, userIds: to, kind: 'GATE_ENTRY',
         title: `${entry.visitorName} has arrived`,
-        body: `${entry.category.toLowerCase()} at the gate for ${entry.flatLabel || 'your flat'}`,
-        link: `/dashboard/gate/log?id=${entry._id}`,
+        body: `${entry.category.toLowerCase()} at the gate for ${entry.hostLabel}`,
+        link: `/dashboard/visitors/log?id=${entry._id}`,
         entityType: 'VisitorEntry', entityId: String(entry._id),
       });
     })().catch(e => logger.error(`Gate arrival notification failed: ${e.message}`));
@@ -385,13 +526,25 @@ export interface LogQuery {
  * controller decides who gets clamped; this function cannot be talked out of it.
  */
 export async function listEntries(
-  societyId: string, query: LogQuery, opts: { residentFlatIds?: string[]; access?: EffectiveAccess } = {},
+  societyId: string, query: LogQuery,
+  opts: { residentFlatIds?: string[]; hostUserId?: string; access?: EffectiveAccess } = {},
 ) {
   const filter: any = { societyId: oid(societyId) };
 
   if (opts.residentFlatIds) {
-    // Even an empty list must mean "nothing", not "everything".
-    filter.flatId = { $in: opts.residentFlatIds.map(oid) };
+    /**
+     * Even an empty list must mean "nothing", not "everything" — and the clamp
+     * is on the FLAT or on being the host, never on one alone.
+     *
+     * Without the second half, a committee member who is visited at the office
+     * cannot see their own visitor. The register recorded the visit, named
+     * them as the host, notified them about it, and then hid it from them,
+     * because "your visitors" was defined as "visitors to a flat you live in".
+     * Attribution that the host themselves cannot read is not attribution.
+     */
+    const own: any[] = [{ flatId: { $in: opts.residentFlatIds.map(oid) } }];
+    if (opts.hostUserId) own.push({ hostUserId: oid(opts.hostUserId) });
+    filter.$and = [...(filter.$and || []), { $or: own }];
   } else if (query.flatId) {
     filter.flatId = oid(query.flatId);
   }
@@ -431,10 +584,16 @@ export async function listEntries(
 /** A presigned link for a visitor photo, checked against the same rules as the log. */
 export async function photoUrl(
   societyId: string, entryId: string, which: 'visitor' | 'vehicle',
-  residentFlatIds?: string[], access?: EffectiveAccess,
+  residentFlatIds?: string[], access?: EffectiveAccess, hostUserId?: string,
 ): Promise<string> {
   const filter: any = { _id: entryId, societyId: oid(societyId) };
-  if (residentFlatIds) filter.flatId = { $in: residentFlatIds.map(oid) };
+  // The same clamp as the log, including the host half — a resident who was
+  // themselves the host may see the face of the person who came to see them.
+  if (residentFlatIds) {
+    const own: any[] = [{ flatId: { $in: residentFlatIds.map(oid) } }];
+    if (hostUserId) own.push({ hostUserId: oid(hostUserId) });
+    filter.$or = own;
+  }
 
   // The wing scope, which `listEntries` has always applied and this did not.
   // A face photograph is the most sensitive thing the gate holds; it should be
@@ -462,13 +621,31 @@ export interface CloseOffResult { societyId: string; closed: number }
  * morning report counts them. What it must never do is quietly mark them as a
  * clean departure, because then the "who is inside" list would look perfect
  * while being wrong.
+ *
+ * **The day bound is load-bearing.** The filter used to be `enteredAt < now`,
+ * which is a tautology — every entry still marked INSIDE was entered in the
+ * past — so the function did not close the day's stragglers, it closed
+ * everybody in the building. Called at any moment other than the society's own
+ * close-off hour it would mark a visitor who walked in thirty seconds earlier
+ * as an unseen departure, which is worse than leaving them open: it fabricates
+ * an exit that never happened and then reports itself as a guess about it.
+ *
+ * Bounding below matters for a second reason. `reconcileDay` scores a day by
+ * `enteredAt`, so sweeping yesterday's leftovers into tonight's run would
+ * silently rewrite an accuracy figure the committee has already read. A close-
+ * off belongs to exactly one day, and only ever settles that day.
  */
 export async function autoCloseStragglers(societyId: string, at = new Date()): Promise<number> {
   const policy = await SocietyOpsPolicy.findOne({ societyId }).select('gate.exit').lean();
   if (!policy?.gate?.exit?.trackExit) return 0;
 
+  const dayStart = new Date(at.getFullYear(), at.getMonth(), at.getDate());
+
   const res = await VisitorEntry.updateMany(
-    { societyId: oid(societyId), status: 'INSIDE', enteredAt: { $lt: at } },
+    {
+      societyId: oid(societyId), status: 'INSIDE',
+      enteredAt: { $gte: dayStart, $lt: at },
+    },
     { $set: { status: 'LEFT', exitedAt: at, exitSource: 'AUTO_CLOSE', isEstimated: true } },
   );
   if (res.modifiedCount) {
@@ -547,6 +724,129 @@ export async function findOverstays(societyId: string, at = new Date()) {
 export async function markOverstayNotified(ids: string[]) {
   if (!ids.length) return;
   await VisitorEntry.updateMany({ _id: { $in: ids.map(oid) } }, { $set: { overstayNotifiedAt: new Date() } });
+}
+
+/**
+ * Actually tell somebody — the caller these two functions never had.
+ *
+ * `findOverstays` and `markOverstayNotified` shipped correct and complete, with
+ * an index behind them, a `expectedOutAt` written on every entry, an
+ * `overstayNotifiedAt` to keep the alert from repeating, and a policy field
+ * (`gate.exit.overstayAlertAfterMinutes`) a society could configure in the
+ * settings screen. Nothing anywhere called either of them. A society set "alert
+ * after 60 minutes", the switch saved, and no alert was ever sent — the whole
+ * feature existed except for the one line that made it happen.
+ *
+ * The host is told, not the committee. A contractor who is four hours over at
+ * A-102 is A-102's business; broadcasting it to the society would be the same
+ * mistake the vacant-flat branch was making, in a different place.
+ *
+ * Marked BEFORE the notification is awaited, deliberately: a mail failure that
+ * left the stamp unset would re-report the same visitor every hour, and an
+ * alert that repeats is an alert people learn to swipe away.
+ */
+export async function sweepOverstays(societyId: string, at = new Date()): Promise<number> {
+  /**
+   * A society on AUTO_EXPIRE is not chasing anybody, and telling it to would be
+   * the opposite of what it asked for — see `expireDueVisits`. It shares this
+   * caller deliberately: the hourly sweep already runs for every society that
+   * tracks exits, and a second cron entry for the same question is how two
+   * answers to one question start.
+   */
+  const mode = await SocietyOpsPolicy.findOne({ societyId }).select('gate.exit.mode').lean();
+  if (mode?.gate?.exit?.mode === 'AUTO_EXPIRE') return expireDueVisits(societyId, at);
+
+  const rows = await findOverstays(societyId, at);
+  if (!rows.length) return 0;
+
+  await markOverstayNotified(rows.map(r => String(r._id)));
+
+  for (const row of rows) {
+    try {
+      const full = await VisitorEntry.findById(row._id)
+        .select('flatId hostKind hostUserId hostStaffId hostLabel expectedOutAt').lean();
+      if (!full) continue;
+
+      const { userIds } = await resolveHostAudience(societyId, {
+        hostKind: (full.hostKind as HostKind) || 'FLAT',
+        flatId: full.flatId ? String(full.flatId) : undefined,
+        hostUserId: full.hostUserId ? String(full.hostUserId) : undefined,
+        hostStaffId: full.hostStaffId ? String(full.hostStaffId) : undefined,
+      });
+      if (!userIds.length) continue;
+
+      const over = full.expectedOutAt
+        ? Math.max(1, Math.round((at.getTime() - full.expectedOutAt.getTime()) / 60_000))
+        : 0;
+      await notify({
+        societyId, userIds, kind: 'GATE_OVERSTAY',
+        title: `${row.visitorName} is still inside`,
+        body: over
+          ? `${over} minute(s) past the expected departure for ${full.hostLabel || row.flatLabel || 'your flat'}. Tell the gate if they have already gone.`
+          : `Still marked as inside for ${full.hostLabel || row.flatLabel || 'your flat'}. Tell the gate if they have already gone.`,
+        link: `/dashboard/visitors/log?id=${row._id}`,
+        entityType: 'VisitorEntry', entityId: String(row._id),
+      });
+    } catch (e: any) {
+      // One bad row must not cost the rest their alert.
+      logger.error(`Overstay alert failed for entry ${row._id}: ${e.message}`);
+    }
+  }
+
+  logger.info(`Society ${societyId}: flagged ${rows.length} overstaying visitor(s)`);
+  return rows.length;
+}
+
+/**
+ * `gate.exit.mode: AUTO_EXPIRE` — the third exit mode, which until now existed
+ * only as a word in a dropdown.
+ *
+ * MANUAL means a guard taps "left" and SCAN means the code is scanned on the
+ * way out; both were implemented. AUTO_EXPIRE said "we do not record
+ * departures — close each visit when it is expected to end" and did nothing at
+ * all, so a society that chose it got MANUAL and an "inside" list that grew all
+ * day. A promised behaviour with no implementation is worse than the absence of
+ * the option: the society believes the question is handled.
+ *
+ * Three decisions worth stating:
+ *
+ *   **The exit time is the EXPECTED one, not now.** A visit expected to end at
+ *   16:00 and closed by the 17:10 sweep left at 16:00 as far as this society's
+ *   own policy is concerned. Stamping 17:10 would invent a fact about a person
+ *   from the time the cron happened to run.
+ *
+ *   **`isEstimated` is set, always.** Nobody watched them leave. The exit is a
+ *   policy, not an observation, and `reconcileDay` must keep counting it as a
+ *   guess — otherwise choosing AUTO_EXPIRE would show a society 100% exit
+ *   accuracy for recording nothing, which is the one number the whole exit
+ *   design rests on.
+ *
+ *   **The host is not told.** In this mode an overstay is not an event; the
+ *   visit simply ended. Alerting would be the nagging the society switched off.
+ */
+export async function expireDueVisits(societyId: string, at = new Date()): Promise<number> {
+  const policy = await SocietyOpsPolicy.findOne({ societyId }).select('gate.exit').lean();
+  // Not tracking exits at all, or tracking them some other way: not ours.
+  if (!policy?.gate?.exit?.trackExit || policy.gate.exit.mode !== 'AUTO_EXPIRE') return 0;
+
+  const res = await VisitorEntry.updateMany(
+    {
+      societyId: oid(societyId), status: 'INSIDE',
+      expectedOutAt: { $exists: true, $lte: at },
+    },
+    // A pipeline update, because `exitedAt` is copied from the row's own
+    // `expectedOutAt` rather than set to a constant.
+    [{
+      $set: {
+        status: 'LEFT', exitedAt: '$expectedOutAt',
+        exitSource: 'AUTO_CLOSE', isEstimated: true,
+      },
+    }],
+  );
+  if (res.modifiedCount) {
+    logger.info(`Society ${societyId}: auto-expired ${res.modifiedCount} visit(s) at their expected departure`);
+  }
+  return res.modifiedCount || 0;
 }
 
 /**

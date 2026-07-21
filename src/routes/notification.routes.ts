@@ -3,7 +3,7 @@ import { authenticateJWT, enforceTenantAccess } from '../middlewares/auth.middle
 import { validate } from '../middlewares/validate.middleware';
 import * as controller from '../controllers/notification.controller';
 import {
-  registerDeviceSchema, unregisterDeviceSchema, markReadSchema,
+  registerDeviceSchema, unregisterDeviceSchema, markReadSchema, savePreferencesSchema,
 } from '../validators/notification.validator';
 
 const router = Router();
@@ -21,6 +21,11 @@ router.use(enforceTenantAccess);
  */
 router.get('/', controller.list);
 router.post('/read', validate(markReadSchema), controller.markRead);
+
+// A person's own mutes, channels and quiet hours. Same reasoning as above —
+// there is nobody else's preferences these handlers could reach.
+router.get('/preferences', controller.preferences);
+router.put('/preferences', validate(savePreferencesSchema), controller.savePreferences);
 
 router.get('/config', controller.config);
 router.post('/devices', validate(registerDeviceSchema), controller.registerDevice);

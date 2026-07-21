@@ -116,25 +116,29 @@ async function main() {
 
     // =============================================================== vehicles
     console.log('\nResident vehicles');
+    // The guard is the OFFICE registering on a flat's behalf — they do not live
+    // in 101. A resident may only touch their own flat, which is asserted over
+    // HTTP in verify-privacy-v2 where the check actually sits.
+    const office = { onBehalf: true };
     const car = await addVehicle(SID, {
       flatId: String(flat._id), number: 'MH 12 AB 1234', kind: 'CAR', make: 'Maruti', colour: 'White',
-    }, guard);
+    }, guard, office);
     eq('a vehicle is stored normalised', car.number, 'MH12AB1234');
     eq('...and as the resident typed it, for display', car.displayNumber, 'MH 12 AB 1234');
     eq('...attached to the flat', car.flatLabel, 'A Wing 101');
 
     let dupe = '';
-    try { await addVehicle(SID, { flatId: String(other._id), number: 'mh-12-ab-1234' }, guard); }
+    try { await addVehicle(SID, { flatId: String(other._id), number: 'mh-12-ab-1234' }, guard, office); }
     catch (e: any) { dupe = e.message; }
     ok('the same car cannot be on two flats at once', dupe.includes('already registered'), dupe);
 
     let sameFlat = '';
-    try { await addVehicle(SID, { flatId: String(flat._id), number: 'MH12AB1234' }, guard); }
+    try { await addVehicle(SID, { flatId: String(flat._id), number: 'MH12AB1234' }, guard, office); }
     catch (e: any) { sameFlat = e.message; }
     ok('...nor twice on one flat', sameFlat.includes('already on this flat'), sameFlat);
 
     let nonsense = '';
-    try { await addVehicle(SID, { flatId: String(flat._id), number: 'X!' }, guard); }
+    try { await addVehicle(SID, { flatId: String(flat._id), number: 'X!' }, guard, office); }
     catch (e: any) { nonsense = e.message; }
     ok('nonsense is refused', nonsense.includes('registration number'), nonsense);
 
@@ -150,17 +154,17 @@ async function main() {
     // guard finding the car they are looking at.
     eq('punctuation typed by mistake still finds the car', (await suggestVehicles(SID, 'MH(1')).length, 1);
 
-    await addVehicle(SID, { flatId: String(other._id), number: 'MH12CD5678', kind: 'BIKE' }, guard);
+    await addVehicle(SID, { flatId: String(other._id), number: 'MH12CD5678', kind: 'BIKE' }, guard, office);
     eq('both are listed', (await listVehicles(SID)).length, 2);
     eq('...and one flat sees only its own', (await listVehicles(SID, String(flat._id))).length, 1);
 
     // Deactivated, not deleted — the register still refers to it.
-    ok('a vehicle can be taken off', await removeVehicle(SID, String(car._id), guard));
+    ok('a vehicle can be taken off', await removeVehicle(SID, String(car._id), guard, office));
     eq('...and disappears from the list', (await listVehicles(SID)).length, 1);
     ok('...but the row survives as history',
       !!(await ResidentVehicle.findById(car._id).lean()));
     // Which means the plate is free again for whoever bought the car.
-    const resold = await addVehicle(SID, { flatId: String(other._id), number: 'MH12AB1234' }, guard);
+    const resold = await addVehicle(SID, { flatId: String(other._id), number: 'MH12AB1234' }, guard, office);
     eq('a sold car can be registered by its new owner', String(resold.flatId), String(other._id));
 
     // ============================================================== blocklist
@@ -278,6 +282,40 @@ async function main() {
     // The honesty figure: how much of "who is inside" is a guess.
     ok('exit accuracy is reported, or honestly null when nothing has exited',
       report.gate.exitAccuracy === null || typeof report.gate.exitAccuracy === 'number');
+
+    /**
+     * The two averages, on the bases they claim.
+     *
+     * Set up in a window of its own so exactly one ticket is measured and the
+     * assertion is a number rather than an inequality: raised at midnight,
+     * replied to at 00:30, resolved at 03:00, two of those three hours spent on
+     * hold with nobody able to get into the flat.
+     *
+     * The fix time must read 60 minutes, not 180. The report used to say 180 —
+     * the same tickets the complaints dashboard called an hour — because it
+     * never subtracted `totalPausedMs`, so the hold a resident caused was
+     * published as the staff being slow.
+     */
+    const held = await raise(SID, { title: 'Geyser dead', category: 'Plumbing', flatId: String(flat._id) }, guard);
+    // Through the driver, not the model: Mongoose's `timestamps` owns
+    // `createdAt` and quietly drops an attempt to set it through `updateOne`,
+    // which left the row in the live window and the assertion measuring nothing.
+    await Complaint.collection.updateOne({ _id: held._id }, {
+      $set: {
+        createdAt: new Date('2024-03-01T00:00:00Z'),
+        firstRespondedAt: new Date('2024-03-01T00:30:00Z'),
+        resolvedAt: new Date('2024-03-01T03:00:00Z'),
+        status: 'RESOLVED',
+        totalPausedMs: 2 * 60 * 60_000,
+      },
+    });
+    const paused = await opsReport(SID, new Date('2024-03-01T00:00:00Z'), new Date('2024-03-01T23:59:59Z'));
+    eq('only the held ticket is in that window', paused.complaints.resolved, 1);
+    eq('THE FIX TIME LEAVES OUT THE HOURS NOBODY COULD WORK', paused.complaints.avgResolutionMinutes, 60);
+    // Not 180 minus the hold: the reply landed before it, and no field records
+    // how much of a hold fell before the reply, so this one stays wall clock.
+    eq('...while the reply gap stays wall clock and is not gutted by it',
+      paused.complaints.avgFirstResponseMinutes, 30);
 
     const empty = await opsReport(SID, new Date('2020-01-01'), new Date('2020-01-02'));
     eq('a period with nothing in it reports zero rather than breaking', empty.complaints.raised, 0);

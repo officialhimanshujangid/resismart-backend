@@ -70,6 +70,28 @@ export interface IChargeHead extends Document {
   sacCode?: string;
 
   isRecurring: boolean;
+
+  /**
+   * How often a recurring head is billed.
+   *
+   * Invoicing has always been monthly — `billingPeriod` is `YYYY-MM` and
+   * `isRecurring` was the only frequency control there was. So every annual
+   * levy an Indian society actually raises (parking, the festival fund, the
+   * yearly sinking-fund contribution) had to be put through by hand as a
+   * special demand, every year, and remembered.
+   *
+   * `MONTHLY` is the default, so every head that exists today keeps behaving
+   * exactly as it does now. A `YEARLY` head is skipped in eleven months of
+   * twelve and billed in `annualBillingMonth` — defaulting to April, the start
+   * of the Indian financial year, which is when most societies raise them.
+   *
+   * Generation stays idempotent per `{society, flat, period}`, so re-running
+   * April cannot bill an annual charge twice.
+   */
+  billingFrequency: 'MONTHLY' | 'YEARLY';
+  /** 1–12. Required when `billingFrequency` is YEARLY. */
+  annualBillingMonth?: number;
+
   isActive: boolean;
   sortOrder: number;
 
@@ -130,6 +152,8 @@ const ChargeHeadSchema = new Schema<IChargeHead>({
   sacCode: { type: String },
 
   isRecurring: { type: Boolean, default: true },
+  billingFrequency: { type: String, enum: ['MONTHLY', 'YEARLY'], default: 'MONTHLY' },
+  annualBillingMonth: { type: Number, min: 1, max: 12 },
   isActive: { type: Boolean, default: true },
   sortOrder: { type: Number, default: 100 },
 

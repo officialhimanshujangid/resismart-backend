@@ -28,6 +28,7 @@ import accessRoleRoutes from './routes/access-role.routes';
 import visitorRoutes from './routes/visitor.routes';
 import staffRoutes from './routes/staff.routes';
 import complaintRoutes from './routes/complaint.routes';
+import parkingRoutes from './routes/parking.routes';
 import notificationRoutes from './routes/notification.routes';
 import adminTransferRoutes from './routes/admin-transfer.routes';
 import societyFinanceRoutes from './routes/society-finance.routes';
@@ -53,7 +54,7 @@ const allowedOrigins = process.env.CORS_ORIGINS
 
 app.use(cors({
   origin: allowedOrigins,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
@@ -112,6 +113,32 @@ app.use('/api/v1/webhooks', webhookLimiter, express.raw({ type: '*/*' }), webhoo
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+/**
+ * Where visitor management is mounted.
+ *
+ * The module is `/api/v1/visitors`. `/api/v1/gate` is its former name and stays
+ * mounted as an alias for one release: guard tablets hold a cached bundle that
+ * still calls the old prefix. Both point at the same router instance, so there
+ * is only ever one gate limiter and one module check.
+ *
+ * To retire the alias, delete the second entry — mount and rate-limiter
+ * exemption both follow from this one list.
+ */
+export const VISITOR_MOUNTS = ['/api/v1/visitors', '/api/v1/gate'] as const;
+
+/**
+ * The same list as `req.path` sees it inside the `/api` middleware below.
+ *
+ * Derived rather than retyped, deliberately. The exemption used to be a literal
+ * `'/v1/gate'` sitting two hundred lines away from the mount it had to agree
+ * with; when they disagree the guard's tablet drops silently from its 2000/15min
+ * device tier to the 300/15min human one and gets cut off mid-shift.
+ */
+const VISITOR_PATH_PREFIXES = VISITOR_MOUNTS.map((m) => m.replace(/^\/api/, ''));
+
+export const isVisitorPath = (path: string) =>
+  VISITOR_PATH_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+
 // 7. Apply rate limiters (otp limiter first so it owns /auth/otp)
 app.use('/api/v1/auth/otp', otpLimiter);
 app.use('/api/v1/auth', authLimiter);
@@ -122,8 +149,13 @@ app.use('/api/v1/auth', authLimiter);
 // mid-shift — at which point they fall back to paper and the evening's record
 // is lost. That gate limiter existed already and was DEAD, because this line
 // ran first and refused the request before the router was ever reached.
+//
+// This predicate is keyed on literal path strings, so it has to be edited in
+// step with the mount below — a mount that moves without it puts the guard's
+// tablet back under the human tier. `verify-visitor-routes.ts` asserts on
+// `isVisitorPath` directly for exactly that reason.
 app.use('/api', (req, res, next) =>
-  req.path.startsWith('/v1/gate') ? next() : generalLimiter(req, res, next));
+  isVisitorPath(req.path) ? next() : generalLimiter(req, res, next));
 
 // 8. Base route
 app.get('/', (_req, res) => {
@@ -151,9 +183,11 @@ app.use('/api/v1/marketplace', marketplaceRoutes);
 app.use('/api/v1/public/marketplace', publicMarketplaceRoutes);
 app.use('/api/v1/committee', committeeRoutes);
 app.use('/api/v1/access-roles', accessRoleRoutes);
-app.use('/api/v1/gate', visitorRoutes);
+// Visitor management, at its own name and its old one. See VISITOR_MOUNTS.
+VISITOR_MOUNTS.forEach((mount) => app.use(mount, visitorRoutes));
 app.use('/api/v1/staff', staffRoutes);
 app.use('/api/v1/complaints', complaintRoutes);
+app.use('/api/v1/parking', parkingRoutes);
 app.use('/api/v1/notifications', notificationRoutes);
 app.use('/api/v1/admin-transfer', adminTransferRoutes);
 app.use('/api/v1/finance/society', societyFinanceRoutes);

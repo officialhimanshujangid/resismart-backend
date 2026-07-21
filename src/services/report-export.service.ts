@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import PDFDocument from 'pdfkit';
 import ExcelJS from 'exceljs';
+import { registerPdfFonts, PDF_FONT, PDF_FONT_BOLD } from '../utils/pdf-font.util';
 
 /**
  * Exports for the statutory reports.
@@ -40,15 +41,16 @@ const safeFile = (s: string) => s.replace(/[^a-zA-Z0-9-_]+/g, '-').replace(/^-|-
 /** Stream `doc` to the response as a PDF attachment. */
 export function sendPdf(res: Response, doc: ExportDoc): void {
   const pdf = new PDFDocument({ size: 'A4', margin: 40, bufferPages: true });
+  registerPdfFonts(pdf);
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `attachment; filename="${safeFile(doc.title)}.pdf"`);
   pdf.pipe(res);
 
-  pdf.fontSize(16).font('Helvetica-Bold').text(doc.societyName, { align: 'center' });
+  pdf.fontSize(16).font(PDF_FONT_BOLD).text(doc.societyName, { align: 'center' });
   pdf.moveDown(0.2);
   pdf.fontSize(13).text(doc.title, { align: 'center' });
-  if (doc.subtitle) pdf.fontSize(9).font('Helvetica').text(doc.subtitle, { align: 'center' });
-  for (const m of doc.meta || []) pdf.fontSize(8).font('Helvetica').fillColor('#555').text(m, { align: 'center' });
+  if (doc.subtitle) pdf.fontSize(9).font(PDF_FONT).text(doc.subtitle, { align: 'center' });
+  for (const m of doc.meta || []) pdf.fontSize(8).font(PDF_FONT).fillColor('#555').text(m, { align: 'center' });
   pdf.fillColor('#000').moveDown(1);
 
   const left = pdf.page.margins.left;
@@ -56,7 +58,7 @@ export function sendPdf(res: Response, doc: ExportDoc): void {
 
   for (const section of doc.sections) {
     if (section.title) {
-      pdf.moveDown(0.5).fontSize(10).font('Helvetica-Bold').text(section.title);
+      pdf.moveDown(0.5).fontSize(10).font(PDF_FONT_BOLD).text(section.title);
       pdf.moveDown(0.3);
     }
     const cols = section.columns.length;
@@ -69,7 +71,7 @@ export function sendPdf(res: Response, doc: ExportDoc): void {
     const writeRow = (cells: Cell[], bold: boolean) => {
       if (pdf.y > pdf.page.height - pdf.page.margins.bottom - 30) pdf.addPage();
       const y = pdf.y;
-      pdf.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
+      pdf.font(bold ? PDF_FONT_BOLD : PDF_FONT).fontSize(8);
       cells.forEach((c, i) => {
         pdf.text(c === null || c === undefined ? '' : String(c), xOf(i), y, {
           width: wOf(i) - 4,
@@ -93,7 +95,7 @@ export function sendPdf(res: Response, doc: ExportDoc): void {
   }
 
   if (!doc.sections.some(s => s.rows.length)) {
-    pdf.moveDown(2).fontSize(10).font('Helvetica').fillColor('#777').text('No transactions in this period.', { align: 'center' });
+    pdf.moveDown(2).fontSize(10).font(PDF_FONT).fillColor('#777').text('No transactions in this period.', { align: 'center' });
   }
 
   const range = pdf.bufferedPageRange();

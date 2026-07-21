@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import { VISITOR_CATEGORIES, OPS_MODULES, RESIDENT_MOVEMENT } from '../models/society-ops-policy.model';
+import {
+  VISITOR_CATEGORIES, OPS_MODULES, RESIDENT_MOVEMENT, ID_PROOF_TYPES,
+} from '../models/society-ops-policy.model';
 
 const objectId = /^[0-9a-fA-F]{24}$/;
 
@@ -35,6 +37,18 @@ export const recordEntrySchema = z.object({
    * rather than "the software threw it away".
    */
   entryGateId: z.string().regex(objectId).optional(),
+  /**
+   * Who they came to see, when it is not simply a flat.
+   *
+   * Absent entirely until now, which is why a visitor for a committee member
+   * had nowhere to go: the console could only send `flatId`, so the request
+   * resolved to nobody and the entry was invisible to the very person being
+   * visited. The service still decides what each kind means — this only says
+   * which shapes are allowed through the door.
+   */
+  hostKind: z.enum(['FLAT', 'COMMITTEE', 'OFFICE', 'STAFF']).optional(),
+  hostUserId: z.string().regex(objectId).optional(),
+  hostStaffId: z.string().regex(objectId).optional(),
 });
 
 /** Marking somebody out, optionally naming the door they left by. */
@@ -63,6 +77,20 @@ export const updateOpsPolicySchema = z.object({
       photo: captureRule.optional(),
       phone: captureRule.optional(),
       idProof: captureRule.optional(),
+      /**
+       * Which IDs the gate may ask for — settable at last.
+       *
+       * The field has existed since the module was written and there was no way
+       * to change it and nothing that read it, so every society ran the default
+       * list and `idType` was stored exactly as typed. It is a closed enum
+       * rather than free text for one reason: Aadhaar. A free-string list would
+       * let a society configure "AADHAAR" in ten seconds, and the whole point of
+       * `ID_PROOF_TYPES` is that this product does not collect it at a gate.
+       *
+       * At least one, because an empty list plus `idProof: REQUIRED` is a
+       * society whose gate can never admit anybody.
+       */
+      allowedIdTypes: z.array(z.enum(ID_PROOF_TYPES)).min(1, 'Pick at least one kind of ID.').optional(),
       categoriesEnabled: z.array(z.enum(VISITOR_CATEGORIES)).optional(),
     }).optional(),
     exit: z.object({
@@ -83,6 +111,18 @@ export const updateOpsPolicySchema = z.object({
       logMovement: z.boolean().optional(),
       logVehicleOnly: z.boolean().optional(),
     }).optional(),
+    /**
+     * Who is asked about a visitor to an empty flat.
+     *
+     * `COMMITTEE_ALL` is deliberately last and deliberately reachable: it is
+     * what the code used to do unconditionally, and a society that genuinely
+     * wants it should be able to choose it — as a choice, not as a default
+     * nobody knew about.
+     */
+    vacantFlat: z.object({
+      handler: z.enum(['OWNER_OF_RECORD', 'DUTY_ROSTER', 'NAMED_MEMBERS', 'COMMITTEE_ALL']).optional(),
+      namedUserIds: z.array(z.string().regex(/^[0-9a-fA-F]{24}$/)).max(20).optional(),
+    }).optional(),
   }).optional(),
 
   privacy: z.object({
@@ -98,6 +138,33 @@ export const updateOpsPolicySchema = z.object({
   }).optional(),
 });
 
+// ------------------------------------------------------------- duty roster
+
+/**
+ * One seat on the rota: a person, a day, a shift, and optionally a wing.
+ *
+ * `blockId` is nullable rather than merely optional because clearing it is a
+ * real edit — "this is not D Wing's problem any more, it is the whole society's"
+ * — and an optional-only field cannot express it: an absent key on a PUT has to
+ * mean "leave alone", or every partial save would silently unscope the row.
+ *
+ * `weekday` is 0–6 with 0 = Sunday, matching `Date.prototype.getDay()`. A
+ * friendlier enum here would need translating on every read, and the read
+ * happens on every visitor to an empty flat.
+ */
+export const dutyRosterSchema = z.object({
+  userId: z.string().regex(objectId, 'Pick the person on duty.'),
+  blockId: z.string().regex(objectId).nullable().optional(),
+  weekday: z.number().int().min(0).max(6),
+  shift: z.enum(['ALL_DAY', 'DAY', 'NIGHT']).optional(),
+  notes: z.string().max(300).optional(),
+});
+
+/** Everything editable, plus retiring the row. Nothing here may be required. */
+export const dutyRosterUpdateSchema = dutyRosterSchema.partial().extend({
+  isActive: z.boolean().optional(),
+});
+
 /**
  * Asking the flat. Same shape as an entry, minus everything the register adds —
  * the request is about a decision, and asking for an id proof before anybody
@@ -111,6 +178,11 @@ export const askApprovalSchema = z.object({
   photoKey: z.string().max(300).optional(),
   vehicleNumber: z.string().max(20).optional(),
   notes: z.string().max(500).optional(),
+  // Same host as the entry. Asking and recording must not be able to disagree
+  // about who the visit is for.
+  hostKind: z.enum(['FLAT', 'COMMITTEE', 'OFFICE', 'STAFF']).optional(),
+  hostUserId: z.string().regex(objectId).optional(),
+  hostStaffId: z.string().regex(objectId).optional(),
 });
 
 export const decideApprovalSchema = z.object({
@@ -169,6 +241,12 @@ export const revokePassSchema = z.object({
 export const redeemPassSchema = z.object({
   code: z.string().regex(/^[0-9]{6}$/, 'A pass code is six digits').optional(),
   payload: z.string().max(2000).optional(),
+  // What the invitation could not carry. A pass has no photo field, so in a
+  // society with `capture.photo: REQUIRED` a scan could never satisfy the rule
+  // — every redemption failed, and (before the ordering was fixed) destroyed
+  // the invitation on the way. The guard captures it at the gate instead.
+  photoKey: z.string().max(300).optional(),
+  visitorPhone: z.string().max(20).optional(),
 }).refine(v => !!v.code !== !!v.payload, { message: 'Send either a code or a scanned pass, not both' });
 
 // ------------------------------------------------------ vehicles & blocklist
@@ -204,9 +282,22 @@ export const unblockSchema = z.object({
 
 export const syncPassesSchema = z.object({
   items: z.array(z.object({
-    clientId: z.string().max(64),
+    // Required, and now load-bearing: it is the dedupe key that makes a retried
+    // sync write one visitor rather than two. A blank one is refused per item
+    // in the controller rather than silently treated as its own scan.
+    clientId: z.string().min(1, 'Each queued scan needs a client id').max(64),
     code: z.string().regex(/^[0-9]{6}$/).optional(),
     payload: z.string().max(2000).optional(),
+    /**
+     * A claim about the past, not an instruction.
+     *
+     * Still accepted, because an offline entry that records the sync time
+     * instead of the arrival time makes the evening's register wrong. But the
+     * controller clamps a future time to now and refuses anything older than
+     * the 12-hour offline window — unbounded, this field let any pass ever
+     * issued be replayed forever, which is the exact exposure the signed
+     * expiry cap exists to prevent.
+     */
     scannedAt: z.string().refine(v => !Number.isNaN(new Date(v).getTime()), 'Not a date').optional(),
   })).max(200),
 });

@@ -7,6 +7,7 @@ import { User } from '../models/user.model';
 import { attachTenantMembership } from './identity.service';
 import { logFlatEvent, verifyContacts, consumeContacts } from './household.service';
 import EmailService from './email.service';
+import { releaseAllocationsForFlat } from './parking.service';
 import { isEmail } from '../utils/phone.util';
 import { TenantType, UserRole } from '../constants/roles';
 
@@ -271,6 +272,25 @@ export const sellFlat = async (flatId: string, societyId: string, input: SellInp
   const affected = await deactivateResidents(fId, () => true, actor, session);
   await reconcileMemberships(affected, sId, session);
   await Flat.updateOne({ _id: fId }, { $set: { ownerUserId: null, status: FlatStatus.VACANT } }, { session });
+
+  /**
+   * The bays go back to the society, and the billing count with them.
+   *
+   * A sale that left parking allotted would keep charging the departed owner
+   * for bays the buyer is now using — `Flat.quantities.parkingSlots` is derived
+   * from live allocations, so an un-released bay is a real line on a real
+   * invoice. Joins THIS session rather than opening its own: the sale is one
+   * transaction, and a rollback must take the release with it.
+   *
+   * Deliberately release rather than transfer. Parking is allotted by the
+   * committee, often with a waiting list; assuming a buyer inherits the seller's
+   * bay would quietly jump that queue. The committee re-allots.
+   */
+  await releaseAllocationsForFlat(
+    societyId, flatId, 'Flat sold',
+    { userId: String(actor.userId), userName: actor.name },
+    { session },
+  );
 
   // Register the buyer as the new owner.
   const verified = await verifyContacts(input.buyer, input);

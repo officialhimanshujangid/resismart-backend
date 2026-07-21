@@ -46,6 +46,29 @@ export type ExitSource = 'GUARD' | 'SCAN' | 'AUTO_CLOSE';
  */
 export type AdmittedVia = 'GUARD' | 'RESIDENT_APPROVAL' | 'PASS' | 'EXPECTED' | 'OVERRIDE' | 'NOTIFY';
 
+/**
+ * WHO they came to see — and why a flat id was never enough.
+ *
+ * A visit used to be, structurally, a visit to a flat. Anybody arriving for the
+ * secretary, for the society office, or for the manager had no flat to be filed
+ * against, so the audience resolved to `{userIds: [], via: 'NO_FLAT'}`: nobody
+ * was notified, nobody could approve, and the entry was invisible to every
+ * resident including the person actually being visited. That is not a gap in
+ * the notification code — it is a gap in the record, and it has to be closed in
+ * the model.
+ *
+ *   FLAT      — the normal case; `flatId` carries it and the household rules apply
+ *   COMMITTEE — a serving committee member, named in `hostUserId`
+ *   STAFF     — somebody on the society's own roll, named in `hostStaffId`
+ *   OFFICE    — the society itself: the office, an AGM, a vendor meeting. There
+ *               is no one person, so the audience comes from whoever is on duty
+ *
+ * `hostLabel` is denormalised and always present because the notification body
+ * has to be able to NAME the host — "somebody came to the gate" with no host is
+ * the message that reads as a leak even when it is a duty.
+ */
+export type HostKind = 'FLAT' | 'COMMITTEE' | 'OFFICE' | 'STAFF';
+
 export interface IVisitorEntry extends Document {
   societyId: mongoose.Types.ObjectId;
   /** Sequential per society per day, so a guard can call out "number 14". */
@@ -73,6 +96,15 @@ export interface IVisitorEntry extends Document {
   flatId?: mongoose.Types.ObjectId;
   flatLabel?: string;
   blockId?: mongoose.Types.ObjectId;
+
+  /** See `HostKind`. Defaults to FLAT, which is what every existing row is. */
+  hostKind: HostKind;
+  /** The committee member or resident actually being visited. */
+  hostUserId?: mongoose.Types.ObjectId;
+  /** The manager, the supervisor — somebody on the society's own roll. */
+  hostStaffId?: mongoose.Types.ObjectId;
+  /** "A Wing 102", "Secretary — R. Nair". Always set; see the pre-validate hook. */
+  hostLabel: string;
 
   vehicleNumber?: string;
   vehiclePhotoKey?: string;
@@ -111,6 +143,17 @@ export interface IVisitorEntry extends Document {
   /** Set once so the overstay alert cannot fire twice for the same visitor. */
   overstayNotifiedAt?: Date;
 
+  /**
+   * The queue id a guard device gave this arrival while it was offline.
+   *
+   * The dedupe key for reconciliation, and it lives on the ENTRY rather than on
+   * the pass on purpose: the entry is the thing that must not exist twice. A
+   * device that syncs, loses the response and retries would otherwise write the
+   * same visitor into the register again — and a unique index is the only
+   * version of "sync is idempotent" that survives two devices retrying at once.
+   */
+  offlineClientId?: string;
+
   guardStaffId?: mongoose.Types.ObjectId;
   guardName: string;
   exitGuardName?: string;
@@ -145,6 +188,15 @@ const VisitorEntrySchema = new Schema<IVisitorEntry>({
   flatLabel: { type: String },
   blockId: { type: Schema.Types.ObjectId, ref: 'Block' },
 
+  hostKind: { type: String, enum: ['FLAT', 'COMMITTEE', 'OFFICE', 'STAFF'], default: 'FLAT' },
+  hostUserId: { type: Schema.Types.ObjectId, ref: 'User' },
+  hostStaffId: { type: Schema.Types.ObjectId, ref: 'SocietyStaff' },
+  // Defaulted rather than `required`, and filled by the hook below. Requiring it
+  // would reject every row written by anything that predates the host model —
+  // including the fixtures other verify scripts build by hand — and a schema
+  // that refuses old-shaped data is a migration disguised as a validation rule.
+  hostLabel: { type: String, trim: true, maxlength: 160, default: '' },
+
   vehicleNumber: { type: String, trim: true, uppercase: true },
   vehiclePhotoKey: { type: String },
 
@@ -162,6 +214,7 @@ const VisitorEntrySchema = new Schema<IVisitorEntry>({
   isEstimated: { type: Boolean, default: false },
   flaggedReason: { type: String, trim: true, maxlength: 300 },
   overstayNotifiedAt: { type: Date },
+  offlineClientId: { type: String, trim: true, maxlength: 64 },
 
   guardStaffId: { type: Schema.Types.ObjectId, ref: 'SocietyStaff' },
   guardName: { type: String, required: true },
@@ -175,6 +228,21 @@ const VisitorEntrySchema = new Schema<IVisitorEntry>({
   updatedByName: { type: String, required: true },
 }, { timestamps: true });
 
+/**
+ * A host label, always, even on a row nobody set one on.
+ *
+ * "Always present" is the whole value of the field: every screen and every
+ * notification body can then say who the visit is FOR without a null check and
+ * without a join. A hook rather than a `required` so the guarantee also covers
+ * rows written before the host model existed and rows written by a caller that
+ * has not been taught about it yet — the invariant belongs to the collection,
+ * not to one code path.
+ */
+VisitorEntrySchema.pre('validate', function (next) {
+  if (!this.hostLabel) this.hostLabel = this.flatLabel || 'The society';
+  next();
+});
+
 // "Who is inside right now" is the busiest query on the gate console.
 VisitorEntrySchema.index({ societyId: 1, status: 1, enteredAt: -1 });
 VisitorEntrySchema.index({ societyId: 1, enteredAt: -1 });
@@ -184,6 +252,16 @@ VisitorEntrySchema.index({ societyId: 1, flatId: 1, enteredAt: -1 });
 VisitorEntrySchema.index({ societyId: 1, status: 1, expectedOutAt: 1 });
 // The retention purge.
 VisitorEntrySchema.index({ societyId: 1, createdAt: 1 });
+// A non-FLAT host reading their OWN visits. Without this the only way to answer
+// "who came to see the secretary" is a collection scan, which is why the
+// question was never asked at all.
+VisitorEntrySchema.index({ societyId: 1, hostUserId: 1, enteredAt: -1 });
+// Offline sync, exactly once. Partial rather than sparse: two entries with no
+// clientId at all are the normal case and must not collide with each other.
+VisitorEntrySchema.index(
+  { societyId: 1, offlineClientId: 1 },
+  { unique: true, partialFilterExpression: { offlineClientId: { $type: 'string' } } },
+);
 
 export const VisitorEntry = mongoose.model<IVisitorEntry>('VisitorEntry', VisitorEntrySchema);
 export default VisitorEntry;

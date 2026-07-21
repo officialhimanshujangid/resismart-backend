@@ -27,6 +27,12 @@ export const MODULE_CATALOG: ModuleInfo[] = [
   { key: 'COMPLAINTS_CONDUCT', label: 'Conduct complaints', blurb: 'Complaints about a person’s behaviour. Give this to as few people as possible.' },
   { key: 'STAFF_VIEW', label: 'Staff list', blurb: 'Who works here.' },
   { key: 'STAFF_MANAGE', label: 'Manage staff', blurb: 'Hire, change, end, and assign duties.' },
+  // Two rows, because seeing the map and changing it are genuinely different
+  // jobs — and the view half is not merely "read-only": a slot's popover names
+  // the flat, the resident and the number plate, which is a directory of who
+  // owns what car. A resident sees free or taken and nothing else.
+  { key: 'PARKING_VIEW', label: 'Parking map', blurb: 'The map, and who holds each slot.' },
+  { key: 'PARKING_MANAGE', label: 'Manage parking', blurb: 'Create slots, allot, release, decide the waiting list.' },
   { key: 'RESIDENTS_VIEW', label: 'Resident directory', blurb: 'Names and contact details. A gatekeeper does not need this.' },
   { key: 'COMMITTEE_MANAGE', label: 'Committee', blurb: 'Start a term, add and remove members.' },
   { key: 'ACCESS_MANAGE', label: 'Who can do what', blurb: 'Create roles and hand out access. Admin work.' },
@@ -52,6 +58,20 @@ const grants = (spec: Partial<Record<AccessModule, PermissionLevel>>): IModuleGr
  * can grant itself more is not a permission system. MyGate lets any master-
  * access admin mint another master-access admin with no gate at all; that is
  * the door this keeps shut.
+ *
+ * **Parking.** These roles predate the parking module, so for a while not one of
+ * them granted `PARKING_VIEW` or `PARKING_MANAGE` — a society admin saw the
+ * parking menu because `isAdmin` bypasses the grid entirely, and a Chairman or
+ * an employed manager never did, in a society that had switched parking on and
+ * drawn its bays. The split below follows the split everywhere else in this
+ * list: the three people who run the society day to day may allot and release,
+ * the ones who oversee may look, and a guard gets neither. A guard's job is the
+ * gate, and the slot popover names the flat, the resident and their number
+ * plate — a directory of who owns which car, handed to the person with the most
+ * turnover in the building.
+ *
+ * These grants only reach a society that has never been seeded — see the note on
+ * `seedAccessRoles`, which inserts missing ROLES and never edits existing ones.
  */
 const SEEDED_ROLES: { name: string; description: string; appliesTo: 'COMMITTEE' | 'STAFF' | 'BOTH'; spec: Partial<Record<AccessModule, PermissionLevel>> }[] = [
   {
@@ -60,6 +80,7 @@ const SEEDED_ROLES: { name: string; description: string; appliesTo: 'COMMITTEE' 
     spec: {
       GATE_CONSOLE: 'READ', GATE_LOGS: 'FULL', COMPLAINTS_MANAGE: 'FULL', COMPLAINTS_CONDUCT: 'FULL',
       STAFF_VIEW: 'FULL', STAFF_MANAGE: 'FULL', RESIDENTS_VIEW: 'READ', COMMITTEE_MANAGE: 'FULL',
+      PARKING_VIEW: 'FULL', PARKING_MANAGE: 'FULL',
       OPS_SETTINGS: 'FULL', FINANCE_VIEW: 'FULL', FINANCE_MANAGE: 'FULL',
     },
   },
@@ -69,6 +90,7 @@ const SEEDED_ROLES: { name: string; description: string; appliesTo: 'COMMITTEE' 
     spec: {
       GATE_LOGS: 'FULL', COMPLAINTS_MANAGE: 'FULL', COMPLAINTS_CONDUCT: 'FULL',
       STAFF_VIEW: 'FULL', STAFF_MANAGE: 'FULL', RESIDENTS_VIEW: 'READ', COMMITTEE_MANAGE: 'FULL',
+      PARKING_VIEW: 'FULL', PARKING_MANAGE: 'FULL',
       OPS_SETTINGS: 'FULL', FINANCE_VIEW: 'FULL',
     },
   },
@@ -77,13 +99,20 @@ const SEEDED_ROLES: { name: string; description: string; appliesTo: 'COMMITTEE' 
     description: 'The money, and enough context to make sense of it.',
     spec: {
       GATE_LOGS: 'READ', COMPLAINTS_MANAGE: 'READ', STAFF_VIEW: 'READ',
+      // Read, not manage: parking is money, and the treasurer needs to see which
+      // flat holds how many slots to make sense of the parking line on a bill.
+      // Who gets a slot is the committee's decision, not the treasurer's.
+      PARKING_VIEW: 'READ',
       FINANCE_VIEW: 'FULL', FINANCE_MANAGE: 'FULL',
     },
   },
   {
     name: 'Committee member', appliesTo: 'COMMITTEE',
     description: 'Sees what the committee sees, changes little.',
-    spec: { GATE_LOGS: 'READ', COMPLAINTS_MANAGE: 'READ', STAFF_VIEW: 'READ', FINANCE_VIEW: 'READ' },
+    spec: {
+      GATE_LOGS: 'READ', COMPLAINTS_MANAGE: 'READ', STAFF_VIEW: 'READ',
+      PARKING_VIEW: 'READ', FINANCE_VIEW: 'READ',
+    },
   },
   {
     name: 'Society manager', appliesTo: 'STAFF',
@@ -91,6 +120,8 @@ const SEEDED_ROLES: { name: string; description: string; appliesTo: 'COMMITTEE' 
     spec: {
       GATE_CONSOLE: 'FULL', GATE_LOGS: 'FULL', COMPLAINTS_MANAGE: 'FULL',
       STAFF_VIEW: 'FULL', STAFF_MANAGE: 'FULL', RESIDENTS_VIEW: 'READ',
+      // The person who actually walks the basement and knows which bay is empty.
+      PARKING_VIEW: 'FULL', PARKING_MANAGE: 'FULL',
       OPS_SETTINGS: 'FULL', FINANCE_VIEW: 'READ',
     },
   },
@@ -121,12 +152,31 @@ const SEEDED_ROLES: { name: string; description: string; appliesTo: 'COMMITTEE' 
     description: 'Can see everything, can change nothing.',
     spec: {
       GATE_LOGS: 'READ', COMPLAINTS_MANAGE: 'READ', STAFF_VIEW: 'READ',
-      RESIDENTS_VIEW: 'READ', FINANCE_VIEW: 'READ',
+      RESIDENTS_VIEW: 'READ', PARKING_VIEW: 'READ', FINANCE_VIEW: 'READ',
     },
   },
 ];
 
-/** Idempotent. Safe to call on every read; only ever inserts what is missing. */
+/**
+ * Idempotent. Safe to call on every read; only ever inserts what is missing.
+ *
+ * "Missing" means a role NAME that does not exist yet. It does NOT mean a
+ * permission that has since been added to `SEEDED_ROLES` — a society whose
+ * Chairman row already exists keeps the grid it was created with, so the parking
+ * grants added above reach new societies only.
+ *
+ * That is deliberate rather than an oversight, and the reason is that
+ * `cleanPermissions` stores the FULL grid with `NONE` for anything ungranted:
+ * "never offered this" and "the admin deliberately took this away" are the same
+ * row in the database. A back-fill would therefore hand parking back to a role
+ * an admin had just removed it from, every time this function ran — which is on
+ * every read of the roles list.
+ *
+ * Giving existing societies the new grants needs a one-time, recorded migration
+ * (a `seedVersion` on `AccessRole`, raised once and never re-applied), not a
+ * widening hidden inside an idempotent seeder. Until that exists, an admin on a
+ * live society grants parking to their Chairman by hand on the roles screen.
+ */
 export async function seedAccessRoles(societyId: string, userId: string, userName: string): Promise<number> {
   const existing = await AccessRole.find({ societyId: oid(societyId) }).select('name').lean();
   const have = new Set(existing.map(r => r.name));

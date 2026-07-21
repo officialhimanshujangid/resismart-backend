@@ -28,6 +28,37 @@ export const list = async (req: Request, res: Response) => {
   } catch (e: any) { fail(res, e, 'load notifications'); }
 };
 
+/**
+ * What this person wants to be told about, plus the kinds they have actually
+ * been sent so the screen can offer real switches.
+ *
+ * Both in one response deliberately: a preferences page that has to make two
+ * calls renders once with an empty list of topics and again with a full one,
+ * and the switches jump under the reader's finger.
+ */
+export const preferences = async (req: Request, res: Response) => {
+  try {
+    const { societyId, userId } = ctx(req);
+    const [preference, kinds] = await Promise.all([
+      notifications.getPreference(societyId, userId),
+      notifications.kindsForUser(societyId, userId),
+    ]);
+    res.json({ success: true, data: { preference, kinds } });
+  } catch (e: any) { fail(res, e, 'load your notification settings'); }
+};
+
+/**
+ * Save them. Scoped to `req.user` like everything else in this file — the body
+ * carries the wishes, never whose wishes they are.
+ */
+export const savePreferences = async (req: Request, res: Response) => {
+  try {
+    const { societyId, userId } = ctx(req);
+    const preference = await notifications.savePreference(societyId, userId, req.body);
+    res.json({ success: true, data: { preference }, message: 'Your notification settings are saved.' });
+  } catch (e: any) { fail(res, e, 'save your notification settings'); }
+};
+
 export const markRead = async (req: Request, res: Response) => {
   try {
     const { societyId, userId } = ctx(req);
@@ -66,7 +97,8 @@ export const registerDevice = async (req: Request, res: Response) => {
 
 export const unregisterDevice = async (req: Request, res: Response) => {
   try {
-    const removed = await push.forgetToken(String(req.body.token));
+    const { userId } = ctx(req);
+    const removed = await push.forgetToken(String(req.body.token), userId);
     res.json({ success: true, data: { removed } });
   } catch (e: any) { fail(res, e, 'unregister this device'); }
 };

@@ -237,7 +237,12 @@ async function main() {
     );
     await resume(SID, String(locked._id), { userId: String(plumber._id), userName: "Vijay" }, plumberScope);
     const resumed = await Complaint.findById(locked._id).lean();
-    eq('...and comes back off hold', resumed?.status, 'IN_PROGRESS');
+    // INVERTED in Phase 5, deliberately. This used to demand IN_PROGRESS,
+    // because `resume` landed there unconditionally — and that was the bug:
+    // `locked` was merely ASSIGNED when it went on hold, so coming back as
+    // "in progress" recorded work that nobody had started. `statusBeforePause`
+    // now says where it came from and `resume` returns it there.
+    eq('...and comes back to where it was, not always "in progress"', resumed?.status, 'ASSIGNED');
     ok('the deadline moved out by the time nobody could work',
       resumed!.resolutionDueAt!.getTime() > beforeDue.getTime(),
       `${resumed!.resolutionDueAt!.toISOString()} vs ${beforeDue.toISOString()}`);

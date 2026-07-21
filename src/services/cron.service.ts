@@ -14,13 +14,18 @@ import { SocietyFinanceSettings } from '../models/society-finance-settings.model
 import { SocietyFinanceService } from './society-finance.service';
 import { FinancePolicy } from '../models/finance-policy.model';
 import { SocietyOpsPolicy } from '../models/society-ops-policy.model';
-import { autoCloseStragglers, reconcileDay, purgeOldEntries } from './visitor.service';
-import { purgeOld as purgeOldNotifications } from './notification.service';
+import { autoCloseStragglers, reconcileDay, purgeOldEntries, sweepOverstays } from './visitor.service';
+import {
+  purgeOld as purgeOldNotifications,
+  releaseHeld as releaseHeldNotifications,
+  retryFailedPushes as retryFailedNotificationPushes,
+} from './notification.service';
 import { pruneStaleTokens } from './push.service';
 import { sweepExpired as sweepExpiredApprovals } from './gate-approval.service';
 import { sweepEscalations } from './complaint.service';
 import { sweepExpiringAmcs } from './asset.service';
-import { expireOld as expireOldPasses } from './gate-pass.service';
+import { sweepExpiringVerifications } from './staff.service';
+import { expireOld as expireOldPasses, dropRetiredKey as dropRetiredPassKey } from './gate-pass.service';
 import { expireOld as expireOldTransfers } from './admin-transfer.service';
 import { generateInvoicesForSociety } from './invoicing.service';
 import { MaintenanceInvoice } from '../models/maintenance-invoice.model';
@@ -278,6 +283,35 @@ export function startCronJobs(): void {
   // of them. The job only acts on societies whose chosen hour has just passed.
   cron.schedule('10 * * * *', async () => {
     const hour = new Date().getHours();
+
+    /**
+     * Overstay alerts — the caller `findOverstays` never had.
+     *
+     * The whole feature was already built: `expectedOutAt` on every entry, an
+     * index for the query, `overstayNotifiedAt` so nobody is reported twice,
+     * and `gate.exit.overstayAlertAfterMinutes` in the settings screen. It had
+     * no caller anywhere outside a verify script, so a society could set "alert
+     * after 60 minutes", save it, and no alert would ever be sent.
+     *
+     * Hourly and separate from the close-off below, because the two answer
+     * different questions. The close-off runs once, at the society's chosen
+     * hour, and settles the day. An overstay is happening NOW — a contractor
+     * four hours past a fifteen-minute delivery slot is worth a message this
+     * hour, not at eleven tonight.
+     */
+    try {
+      const tracking = await SocietyOpsPolicy.find({ 'gate.exit.trackExit': true })
+        .select('societyId').lean();
+      let flagged = 0;
+      for (const p of tracking) {
+        try { flagged += await sweepOverstays(String(p.societyId)); }
+        catch (err: any) { logger.error(`[cron] Overstay sweep failed for society ${p.societyId}: ${err.message}`); }
+      }
+      if (flagged) logger.info(`[cron] Flagged ${flagged} overstaying visitor(s)`);
+    } catch (err: any) {
+      logger.error(`[cron] Overstay sweep failed: ${err.message}`);
+    }
+
     try {
       const policies = await SocietyOpsPolicy.find({
         'gate.exit.trackExit': true,
@@ -339,6 +373,40 @@ export function startCronJobs(): void {
   });
 
   /**
+   * Notifications that are waiting on something, every five minutes.
+   *
+   * Two sweeps, one slot, because both are about a message that was written
+   * but not yet heard:
+   *
+   *   `releaseHeld`       — a resident's quiet hours have ended, so the push
+   *                         and the email that were deferred can go now. Five
+   *                         minutes is the granularity of "quiet until 7am";
+   *                         a nightly job would deliver it at 3:50am, which is
+   *                         precisely what the setting asked us not to do.
+   *   `retryFailedPushes` — a push that failed for a transient reason. Before
+   *                         this existed it was simply lost: the device's
+   *                         failureCount ticked up and the message was never
+   *                         offered again.
+   *
+   * Both are bounded queries over sparse indexes and cost nothing when there is
+   * nothing waiting, which is almost always.
+   */
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      const released = await releaseHeldNotifications();
+      if (released) logger.info(`[cron] Released ${released} notification(s) held by quiet hours`);
+    } catch (err: any) {
+      logger.error(`[cron] Held-notification release failed: ${err.message}`);
+    }
+    try {
+      const recovered = await retryFailedNotificationPushes();
+      if (recovered) logger.info(`[cron] Recovered ${recovered} failed push(es) on retry`);
+    } catch (err: any) {
+      logger.error(`[cron] Push retry sweep failed: ${err.message}`);
+    }
+  });
+
+  /**
    * Complaint escalation, hourly.
    *
    * `findEscalations` and `applyEscalation` shipped correct and were never
@@ -383,6 +451,35 @@ export function startCronJobs(): void {
     }
   });
 
+  /**
+   * Police verification expiry, daily, ten minutes after the AMC sweep.
+   *
+   * The third instance of the same gap, and the worst of them.
+   * `findExpiringVerifications` had exactly ONE caller: a passive amber banner
+   * on the staff page, which somebody has to already be looking at to see. So
+   * the one thing this staff model claims over every competitor — that it
+   * tracks when a police verification RUNS OUT, not merely that one was once
+   * done — did nothing at all in production. A guard whose check lapsed
+   * eighteen months ago read exactly like a guard whose check was current.
+   *
+   * Deliberately a separate slot from the AMC sweep rather than sharing its
+   * loop: they warn different people about different things, and a failure in
+   * one must not take the other down with it.
+   */
+  cron.schedule('30 4 * * *', async () => {
+    try {
+      const policies = await SocietyOpsPolicy.find({}).select('societyId').lean();
+      let total = 0;
+      for (const p of policies) {
+        try { total += await sweepExpiringVerifications(String(p.societyId)); }
+        catch (err: any) { logger.error(`[cron] Verification sweep failed for society ${p.societyId}: ${err.message}`); }
+      }
+      if (total) logger.info(`[cron] Warned about ${total} lapsing police verification(s)`);
+    } catch (err: any) {
+      logger.error(`[cron] Verification sweep failed: ${err.message}`);
+    }
+  });
+
   // Notification housekeeping, in the same quiet hour.
   //
   // Two different jobs sharing one slot: old notifications go because they are
@@ -403,6 +500,11 @@ export function startCronJobs(): void {
       // harder to allocate.
       const expired = await expireOldPasses();
       if (expired) logger.info(`[cron] Expired ${expired} gate passes`);
+      // A rotated-out signing key, once nothing in circulation can still be
+      // carrying it. The function refuses inside the grace window, so calling
+      // it daily is safe — it deletes on the first night it is genuinely safe
+      // to, and never one night earlier.
+      await dropRetiredPassKey();
       // An admin handover nobody answered must not sit INITIATED forever — it
       // holds the society's one live-transfer slot and blocks a second attempt.
       const lapsed = await expireOldTransfers();

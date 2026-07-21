@@ -117,10 +117,24 @@ const FlatSchema = new Schema<IFlat>({
     ref: 'Society',
     required: true,
   },
+  /**
+   * Deliberately has NO default.
+   *
+   * It used to default to VACANT, which sounds harmless and was not. The gate
+   * branches on this field: a vacant flat has no household to ask, so the
+   * request goes to the serving committee instead. A society that imported its
+   * flats without setting a status therefore had EVERY flat vacant — so every
+   * arrival in the building notified every committee member, and a committee
+   * member who is also a resident saw alerts about their neighbours' visitors
+   * and reasonably read it as a leak. The edge case was the default path.
+   *
+   * Required, so a flat cannot be born without somebody saying what it is.
+   * Every creation path already sets it; the one that did not was the bug.
+   */
   status: {
     type: String,
     enum: Object.values(FlatStatus),
-    default: FlatStatus.VACANT,
+    required: [true, 'Say whether this flat is empty, owner-occupied or rented.'],
   },
   fullAddress: { type: String, trim: true },
   registrationNumber: { type: String, trim: true },

@@ -39,6 +39,27 @@ export interface PushOutcome {
   attempted: number;
   delivered: number;
   pruned: number;
+  /**
+   * The same two numbers, broken down by user id.
+   *
+   * The totals alone are a trap, and one that shipped: `notification.service`
+   * asked "was anything attempted?" across the WHOLE recipient list to decide
+   * whether to fall back to email. One committee member with a subscribed
+   * browser made `attempted` non-zero, so the other four — who own no device at
+   * all — got no email either. The stated contract was always per-person; only
+   * the arithmetic was per-batch. A per-user breakdown is the only shape that
+   * cannot be read the wrong way.
+   *
+   * A user with no devices is absent from the map, not present with a zero, so
+   * callers must treat "missing" as "no device" — see `attemptedFor`.
+   */
+  attemptedByUser: Record<string, number>;
+  deliveredByUser: Record<string, number>;
+}
+
+/** How many devices we tried for this person. Missing means none — read it here, never inline. */
+export function attemptedFor(outcome: PushOutcome, userId: string): number {
+  return outcome.attemptedByUser[String(userId)] || 0;
 }
 
 // --------------------------------------------------------------------- VAPID
@@ -187,8 +208,24 @@ export async function registerToken(input: {
   return doc!;
 }
 
-export async function forgetToken(token: string): Promise<boolean> {
-  const res = await PushToken.deleteOne({ token });
+/**
+ * Forget a device — but only your own.
+ *
+ * The `userId` clause is the whole point. Without it the filter was `{ token }`
+ * alone, so anybody who learned another person's registration token or web-push
+ * endpoint could silently unsubscribe them: a targeted, permanent way to stop
+ * somebody receiving the one HIGH-priority alert this system exists for, with
+ * nothing on their screen to say it had happened.
+ *
+ * Kept as a required argument rather than an optional one so a caller cannot
+ * omit it and quietly restore the old behaviour. The internal prune path is
+ * `pruneStaleTokens`, which is a different function for a different reason.
+ */
+export async function forgetToken(token: string, userId: string): Promise<boolean> {
+  const res = await PushToken.deleteOne({
+    token,
+    userId: new mongoose.Types.ObjectId(String(userId)),
+  });
   return res.deletedCount > 0;
 }
 
@@ -252,7 +289,10 @@ export async function pushToUsers(
   userIds: string[],
   payload: PushPayload,
 ): Promise<PushOutcome> {
-  const out: PushOutcome = { attempted: 0, delivered: 0, pruned: 0 };
+  const out: PushOutcome = {
+    attempted: 0, delivered: 0, pruned: 0,
+    attemptedByUser: {}, deliveredByUser: {},
+  };
   if (!userIds.length) return out;
 
   let rows: IPushToken[] = [];
@@ -268,6 +308,13 @@ export async function pushToUsers(
   if (!rows.length) return out;
 
   out.attempted = rows.length;
+  // Counted from the rows themselves rather than from the requested ids: a
+  // person with no device must be ABSENT from this map, which is what tells the
+  // caller they are unreachable by push and need the email rung.
+  for (const row of rows) {
+    const uid = String(row.userId);
+    out.attemptedByUser[uid] = (out.attemptedByUser[uid] || 0) + 1;
+  }
   const dead: string[] = [];
 
   await Promise.all(rows.map(async row => {
@@ -275,6 +322,8 @@ export async function pushToUsers(
       const sent = row.platform === 'WEB' ? await sendWeb(row, payload) : await sendMobile(row, payload);
       if (sent) {
         out.delivered++;
+        const uid = String(row.userId);
+        out.deliveredByUser[uid] = (out.deliveredByUser[uid] || 0) + 1;
         // Not awaited: bookkeeping must not slow the fan-out, and losing a
         // lastSeenAt bump costs nothing.
         PushToken.updateOne({ _id: row._id }, { $set: { lastSeenAt: new Date(), failureCount: 0 } }).catch(() => {});

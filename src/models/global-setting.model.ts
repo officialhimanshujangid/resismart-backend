@@ -21,9 +21,28 @@ export interface IGlobalSetting extends Document {
    *
    * PEM-encoded. The PUBLIC half is handed to guard devices so they can verify
    * a QR with no network; the private half never leaves the server.
+   *
+   * **Set PASS_SIGNING_PRIVATE_KEY in the environment for any real install.**
+   * Stored here the private half sits in plaintext in one document shared by
+   * every society, and the society is a claim inside the signed blob rather
+   * than a property of the key — so one leaked row mints passes for every flat
+   * on the platform.
    */
   passSigningPublicKey?: string;
   passSigningPrivateKey?: string;
+  /**
+   * The key that was just retired, and the moment it was.
+   *
+   * Rotation without these would be a silent outage: every pass already sitting
+   * in a guest's WhatsApp was signed by the old key, and every guard device is
+   * carrying a CACHED copy of the old public key for exactly the hours it has
+   * no network. Signing moves to the new pair immediately; verification accepts
+   * BOTH until `passSigningRotatedAt` is older than the maximum offline window.
+   * Nothing may delete the old pair before then.
+   */
+  passSigningPreviousPublicKey?: string;
+  passSigningPreviousPrivateKey?: string;
+  passSigningRotatedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -65,6 +84,15 @@ const GlobalSettingSchema = new Schema({
   },
   passSigningPrivateKey: {
     type: String,
+  },
+  passSigningPreviousPublicKey: {
+    type: String,
+  },
+  passSigningPreviousPrivateKey: {
+    type: String,
+  },
+  passSigningRotatedAt: {
+    type: Date,
   }
 }, {
   timestamps: true,

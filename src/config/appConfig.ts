@@ -83,6 +83,28 @@ export const appConfig = {
   vapidPublicKey: process.env.VAPID_PUBLIC_KEY || '',
   vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || '',
   vapidSubject: process.env.VAPID_SUBJECT || `mailto:${process.env.SUPPORT_EMAIL || 'support@resismart.com'}`,
+  /**
+   * Ed25519, for signing gate passes. Same optional-here reasoning as VAPID
+   * above, with a sharper security edge.
+   *
+   * Left unset, the server generates a pair once and keeps it in the single
+   * GlobalSetting row — in PLAINTEXT, shared by every society on the install.
+   * The society id is a claim INSIDE the signed blob, so anybody who can read
+   * that one document can mint a pass for any flat in any society. Setting
+   * these moves the private half out of the database entirely, where a Mongo
+   * dump or a stray read no longer hands over the whole estate.
+   *
+   * PEM, with literal \n as an .env file has to carry it — unescaped here, the
+   * same way the Firebase key is.
+   */
+  passSigningPublicKey: (process.env.PASS_SIGNING_PUBLIC_KEY || '').replace(/\\n/g, '\n'),
+  passSigningPrivateKey: (process.env.PASS_SIGNING_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  /**
+   * The key being retired, kept verifiable during a rotation. Optional: only an
+   * operator who has rotated env-pinned keys needs it, and only until every
+   * pass signed with the old one has expired.
+   */
+  passSigningPreviousPublicKey: (process.env.PASS_SIGNING_PREVIOUS_PUBLIC_KEY || '').replace(/\\n/g, '\n'),
 };
 
 /**

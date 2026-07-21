@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import * as depth from '../services/gate-depth.service';
 import { DepthError } from '../services/gate-depth.service';
 import { Resident } from '../models/resident.model';
+import { allows } from '../services/access-role.service';
 import { auditFinance } from '../utils/finance-audit.util';
 import { logger } from '../utils/logger.util';
 
@@ -11,6 +12,12 @@ const actorOf = (req: Request) => ({
   userId: String(req.user!.userId),
   userName: String(req.user!.userName || 'Someone'),
 });
+
+/**
+ * The office registering a vehicle for somebody, versus a resident registering
+ * their own. False when `req.access` is absent, which is the safe answer.
+ */
+const onBehalf = (req: Request) => !!req.access && allows(req.access, 'GATE_CONSOLE', 'FULL');
 
 const fail = (res: Response, e: any, what: string) => {
   if (e instanceof DepthError) return res.status(e.status).json({ success: false, message: e.message });
@@ -31,7 +38,7 @@ export const listVehicles = async (req: Request, res: Response) => {
 export const addVehicle = async (req: Request, res: Response) => {
   try {
     const societyId = String(req.user!.activeTenantId);
-    const v = await depth.addVehicle(societyId, req.body, actorOf(req));
+    const v = await depth.addVehicle(societyId, req.body, actorOf(req), { onBehalf: onBehalf(req) });
     auditFinance(req, 'VEHICLE_ADDED', 'ResidentVehicle', String(v._id), {
       newValues: { number: v.displayNumber, flat: v.flatLabel },
     });
@@ -42,7 +49,9 @@ export const addVehicle = async (req: Request, res: Response) => {
 export const removeVehicle = async (req: Request, res: Response) => {
   try {
     const societyId = String(req.user!.activeTenantId);
-    const removed = await depth.removeVehicle(societyId, req.params.id, actorOf(req));
+    const removed = await depth.removeVehicle(societyId, req.params.id, actorOf(req), {
+      onBehalf: onBehalf(req),
+    });
     if (!removed) return res.status(404).json({ success: false, message: 'That vehicle could not be found.' });
     auditFinance(req, 'VEHICLE_REMOVED', 'ResidentVehicle', req.params.id);
     res.json({ success: true, data: { removed }, message: 'Removed.' });
@@ -119,6 +128,6 @@ export const report = async (req: Request, res: Response) => {
     if (isNaN(from.getTime()) || isNaN(to.getTime())) {
       return res.status(400).json({ success: false, message: 'Those dates could not be read.' });
     }
-    res.json({ success: true, data: await depth.opsReport(societyId, from, to) });
+    res.json({ success: true, data: await depth.opsReport(societyId, from, to, req.access) });
   } catch (e: any) { fail(res, e, 'build that report'); }
 };

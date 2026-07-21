@@ -9,7 +9,46 @@ import { FlatEvent } from '../models/flat-event.model';
 import { resolveUserContexts } from '../services/context.service';
 import { listHouseholdMembers } from '../services/household.service';
 import { getCurrentCommittee } from '../services/committee.service';
+import { resolveEntitlements, planUsage } from '../services/entitlement.service';
 import { UserRole } from '../constants/roles';
+
+/**
+ * GET /me/entitlements — the four gates, resolved once.
+ *
+ * Replaces three separate calls the sidebar used to make
+ * (`/finance/society/modules`, `/gate/modules`, `/access-roles/me`), each of
+ * which failed OPEN: on any error the client applied no filtering, so a single
+ * slow response showed a resident the full society-admin menu.
+ *
+ * This one fails CLOSED — `resolveEntitlements` never throws and returns
+ * everything switched off when it cannot tell. The client renders Overview and
+ * a retry, which is recoverable; showing somebody another household's menu is
+ * not.
+ */
+export const getMyEntitlements = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const societyId = req.user?.activeTenantId;
+    const userId = req.user?.userId;
+    const role = req.user?.activeRole as UserRole | undefined;
+
+    if (!societyId || !userId || !role) {
+      res.status(401).json({ success: false, message: 'Not signed in to a society.' });
+      return;
+    }
+
+    const ent = await resolveEntitlements(String(societyId), String(userId), role);
+
+    // Usage only for the people who can act on it — a resident has no use for
+    // "you are at 63 of 50 flats", and it is not their business.
+    const usage = ent.isAdmin ? await planUsage(String(societyId), ent.plan.limits) : undefined;
+
+    res.json({ success: true, data: { ...ent, usage } });
+  } catch (e: any) {
+    // Belt and braces: even an unexpected throw here must not hand the client
+    // an empty body it might read as "no restrictions".
+    res.status(503).json({ success: false, message: 'Could not load what you have access to.' });
+  }
+};
 
 /** GET /me/contexts — every switchable unit (flats/plots/shops + admin roles) for the current user. */
 export const getMyContexts = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
